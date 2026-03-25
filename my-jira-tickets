@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""Lists your open Jira tickets.
+
+Usage: my-jira-tickets [--json] [--project PROJECT]
+
+Environment variables:
+    JIRA_API_TOKEN  — Jira API token (required)
+    JIRA_EMAIL      — Jira account email (required)
+    JIRA_SITE       — Jira site URL (default: redhat.atlassian.net)
+
+Create a token at: https://id.atlassian.com/manage-profile/security/api-tokens
+Note: Atlassian API tokens do not expire by default. They remain valid until
+you revoke them or your org admin enforces a rotation policy.
+
+Examples:
+    my-jira-tickets                    # all open tickets assigned to you
+    my-jira-tickets --json             # JSON output for piping
+    my-jira-tickets --project MYPROJ   # filter by project
+"""
+
+import json
+import os
+import sys
+import urllib.request
+import urllib.error
+import urllib.parse
+import base64
+
+JIRA_API_TOKEN = os.environ.get("JIRA_API_TOKEN")
+if not JIRA_API_TOKEN:
+    print("Error: JIRA_API_TOKEN environment variable is not set.", file=sys.stderr)
+    print(file=sys.stderr)
+    print("1. Go to: https://id.atlassian.com/manage-profile/security/api-tokens", file=sys.stderr)
+    print("2. Create a token and add to your ~/.env:", file=sys.stderr)
+    print(file=sys.stderr)
+    print('   export JIRA_API_TOKEN="your-token-here"', file=sys.stderr)
+    sys.exit(1)
+
+JIRA_EMAIL = os.environ.get("JIRA_EMAIL")
+if not JIRA_EMAIL:
+    print("Error: JIRA_EMAIL environment variable is not set.", file=sys.stderr)
+    print("Add to your ~/.env:", file=sys.stderr)
+    print('  export JIRA_EMAIL="you@example.com"', file=sys.stderr)
+    sys.exit(1)
+
+JIRA_SITE = os.environ.get("JIRA_SITE", "redhat.atlassian.net")
+
+JSON_OUTPUT = "--json" in sys.argv
+PROJECT = None
+args = [a for a in sys.argv[1:] if a != "--json"]
+for i, a in enumerate(args):
+    if a == "--project" and i + 1 < len(args):
+        PROJECT = args[i + 1]
+
+
+def jira_request(path, params=None):
+    """Make an authenticated request to the Jira REST API."""
+    url = f"https://{JIRA_SITE}/rest/api/3{path}"
+    if params:
+        query = "&".join(f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items())
+        url = f"{url}?{query}"
+
+    credentials = base64.b64encode(f"{JIRA_EMAIL}:{JIRA_API_TOKEN}".encode()).decode()
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Basic {credentials}",
+        "Accept": "application/json",
+    })
+
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        print(f"Jira API error: {e.code} {e.reason}", file=sys.stderr)
+        if body:
+            try:
+                err = json.loads(body)
+                for msg in err.get("errorMessages", []):
+                    print(f"  {msg}", file=sys.stderr)
+            except json.JSONDecodeError:
+                pass
+        sys.exit(1)
+
+
+def get_open_tickets():
+    """Returns a list of dicts: {key, summary, status, priority, type, parent, url}"""
+    jql = "assignee = currentUser() AND status NOT IN (Done, Closed) ORDER BY priority ASC, created DESC"
+    if PROJECT:
+        jql = f"project = {PROJECT} AND {jql}"
+
+    data = jira_request("/search/jql", {
+        "jql": jql,
+        "fields": "summary,status,priority,issuetype,parent,customfield_10020",
+        "maxResults": 100,
+    })
+
+    tickets = []
+    for issue in data.get("issues", []):
+        fields = issue["fields"]
+        parent = fields.get("parent")
+        sprints = fields.get("customfield_10020") or []
+        active_sprint = None
+        last_closed_sprint = None
+        for s in sprints:
+            if not isinstance(s, dict):
+                continue
+            if s.get("state") == "active":
+                active_sprint = s.get("name")
+            elif s.get("state") == "closed":
+                # Keep the most recent closed sprint (highest ID = most recent)
+                if last_closed_sprint is None or s.get("id", 0) > last_closed_sprint.get("id", 0):
+                    last_closed_sprint = s
+        priority_name = fields.get("priority", {}).get("name", "Undefined")
+        if priority_name == "Undefined":
+            priority_name = "—"
+        tickets.append({
+            "key": issue["key"],
+            "summary": fields["summary"],
+            "status": fields["status"]["name"],
+            "priority": priority_name,
+            "type": fields["issuetype"]["name"],
+            "parent": parent["key"] if parent else None,
+            "sprint": active_sprint,
+            "last_sprint": last_closed_sprint.get("name") if last_closed_sprint else None,
+            "url": f"https://{JIRA_SITE}/browse/{issue['key']}",
+        })
+
+    return tickets
+
+
+if __name__ == "__main__":
+    tickets = get_open_tickets()
+
+    if JSON_OUTPUT:
+        print(json.dumps(tickets, indent=2))
+    elif not tickets:
+        print("No open tickets found.")
+    else:
+        epic_info = {}
+        epic_children = {}
+        standalone = []
+
+        for t in tickets:
+            if t["type"] == "Epic":
+                epic_info[t["key"]] = t
+                epic_children.setdefault(t["key"], [])
+            elif t["parent"]:
+                epic_children.setdefault(t["parent"], []).append(t)
+            else:
+                standalone.append(t)
+
+        for epic_key, children in epic_children.items():
+            info = epic_info.get(epic_key)
+            if info:
+                print(f"{info['key']}  [{info['status']}]  {info['summary']}")
+            else:
+                print(f"{epic_key}  (epic not assigned to you)")
+            for c in children:
+                print(f"  {c['key']}  [{c['status']}]  [{c['priority']}]  {c['summary']}")
+            print()
+
+        if standalone:
+            print("Standalone tickets:")
+            for t in standalone:
+                print(f"  {t['key']}  [{t['status']}]  [{t['priority']}]  {t['summary']}")
+            print()
+
+        print(f"Total: {len(tickets)} open tickets")

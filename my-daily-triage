@@ -1,0 +1,522 @@
+#!/usr/bin/env python3
+"""Daily triage: action items from Gemini meeting notes + Jira tickets.
+
+Usage: my-daily-triage [OPTIONS]
+
+Options:
+    --days N        Days of action items to scan (default: 7)
+    --project PROJ  Jira project filter (default: all)
+    --notify        Send macOS notification with summary
+    --html          Generate HTML dashboard
+    --welcome       Print one-liner summary (for shell/Claude welcome)
+    --no-interactive  Skip interactive triage prompts
+
+Environment variables:
+    GWS_NAME        — Your name as it appears in Gemini meeting notes
+    JIRA_API_TOKEN  — Jira API token
+    JIRA_EMAIL      — Jira account email
+    JIRA_SITE       — Jira site URL (default: redhat.atlassian.net)
+
+State file: ~/.config/daily-triage/state.json
+Dashboard:  ~/.config/daily-triage/dashboard.html
+"""
+
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+STATE_DIR = Path.home() / ".config" / "daily-triage"
+STATE_FILE = STATE_DIR / "state.json"
+DASHBOARD_FILE = STATE_DIR / "dashboard.html"
+
+# Parse args
+DAYS = 7
+PROJECT = None
+NOTIFY = False
+HTML = False
+WELCOME = False
+INTERACTIVE = True
+
+args = sys.argv[1:]
+i = 0
+while i < len(args):
+    if args[i] == "--days" and i + 1 < len(args):
+        DAYS = int(args[i + 1])
+        i += 2
+    elif args[i] == "--project" and i + 1 < len(args):
+        PROJECT = args[i + 1]
+        i += 2
+    elif args[i] == "--notify":
+        NOTIFY = True
+        i += 1
+    elif args[i] == "--html":
+        HTML = True
+        i += 1
+    elif args[i] == "--welcome":
+        WELCOME = True
+        i += 1
+    elif args[i] == "--no-interactive":
+        INTERACTIVE = False
+        i += 1
+    else:
+        i += 1
+
+
+def item_hash(text):
+    """Create a stable hash for an action item."""
+    return hashlib.sha256(text.strip().encode()).hexdigest()[:16]
+
+
+def load_state():
+    """Load triage state from disk."""
+    if STATE_FILE.exists():
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    return {"triaged": {}}
+
+
+def save_state(state):
+    """Save triage state to disk."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, indent=2)
+
+
+def get_action_items():
+    """Call my-action-items --json and return parsed results."""
+    script = SCRIPT_DIR / "my-action-items"
+    result = subprocess.run(
+        [sys.executable, str(script), "--json", str(DAYS)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return []
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return []
+
+
+def get_jira_tickets():
+    """Call my-jira-tickets --json and return parsed results."""
+    script = SCRIPT_DIR / "my-jira-tickets"
+    cmd = [sys.executable, str(script), "--json"]
+    if PROJECT:
+        cmd.extend(["--project", PROJECT])
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0 or not result.stdout.strip():
+        return []
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return []
+
+
+def macos_notify(title, message):
+    """Send a macOS notification."""
+    subprocess.run([
+        "osascript", "-e",
+        f'display notification "{message}" with title "{title}"'
+    ], capture_output=True)
+
+
+def _group_tickets(tickets):
+    """Group tickets by epic. Returns (epic_groups, standalone)."""
+    epic_info = {}
+    epic_children = {}
+    standalone = []
+    for t in tickets:
+        if t["type"] == "Epic":
+            epic_info[t["key"]] = t
+            epic_children.setdefault(t["key"], [])
+        elif t["parent"]:
+            epic_children.setdefault(t["parent"], []).append(t)
+        else:
+            standalone.append(t)
+    return epic_info, epic_children, standalone
+
+
+def _render_ticket_table(tickets, site="redhat.atlassian.net"):
+    """Render a grouped ticket table as HTML."""
+    if not tickets:
+        return '<p class="empty">No tickets</p>'
+
+    epic_info, epic_children, standalone = _group_tickets(tickets)
+
+    rows = ""
+    for epic_key, children in epic_children.items():
+        info = epic_info.get(epic_key)
+        if info:
+            sc = info["status"].lower().replace(" ", "-")
+            rows += f"""
+            <tr class="epic-row">
+                <td><a href="{info['url']}" target="_blank">{info['key']}</a></td>
+                <td><span class="badge status-{sc}">{info['status']}</span></td>
+                <td>{info['priority']}</td>
+                <td><strong>{info['summary']}</strong></td>
+            </tr>"""
+        else:
+            rows += f"""
+            <tr class="epic-row">
+                <td>{epic_key}</td>
+                <td></td>
+                <td></td>
+                <td><strong>(epic not assigned to you)</strong></td>
+            </tr>"""
+        for c in children:
+            sc = c["status"].lower().replace(" ", "-")
+            rows += f"""
+            <tr class="child-row">
+                <td style="padding-left:2rem"><a href="{c['url']}">{c['key']}</a></td>
+                <td><span class="badge status-{sc}">{c['status']}</span></td>
+                <td>{c['priority']}</td>
+                <td>{c['summary']}</td>
+            </tr>"""
+
+    if standalone:
+        rows += """
+        <tr class="epic-row">
+            <td></td><td></td><td></td>
+            <td><strong>Standalone</strong></td>
+        </tr>"""
+        for t in standalone:
+            sc = t["status"].lower().replace(" ", "-")
+            rows += f"""
+            <tr>
+                <td style="padding-left:2rem"><a href="{t['url']}" target="_blank">{t['key']}</a></td>
+                <td><span class="badge status-{sc}">{t['status']}</span></td>
+                <td>{t['priority']}</td>
+                <td>{t['summary']}</td>
+            </tr>"""
+
+    return f"<table><tr><th>Key</th><th>Status</th><th>Priority</th><th>Summary</th></tr>{rows}</table>"
+
+
+def generate_html(new_items, triaged_items, tickets):
+    """Generate a static HTML dashboard with sprint/all tabs."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    sprint_tickets = [t for t in tickets if t.get("sprint")]
+    sprint_name = ""
+    for t in sprint_tickets:
+        if t.get("sprint"):
+            sprint_name = t["sprint"]
+            break
+
+    # Find last sprint name and tickets
+    last_sprint_name = ""
+    last_sprint_tickets = []
+    for t in tickets:
+        if t.get("last_sprint") and not t.get("sprint"):
+            if not last_sprint_name:
+                last_sprint_name = t["last_sprint"]
+            if t["last_sprint"] == last_sprint_name:
+                last_sprint_tickets.append(t)
+    # Also check tickets in current sprint that were in the last sprint
+    if not last_sprint_name:
+        for t in tickets:
+            if t.get("last_sprint"):
+                last_sprint_name = t["last_sprint"]
+                break
+    if last_sprint_name:
+        last_sprint_tickets = [t for t in tickets if t.get("last_sprint") == last_sprint_name]
+
+    new_rows = ""
+    for meeting, date, text, h in new_items:
+        new_rows += f"""
+        <tr>
+            <td><span class="badge new">NEW</span></td>
+            <td>{meeting}</td>
+            <td>{text}</td>
+        </tr>"""
+
+    jira_site = os.environ.get("JIRA_SITE", "redhat.atlassian.net")
+    triaged_jira_rows = ""
+    triaged_skip_rows = ""
+    for h, info in sorted(triaged_items.items(), key=lambda x: x[1].get("triaged", ""), reverse=True):
+        status = info.get("status", "unknown")
+        ticket = info.get("ticket", "")
+        meeting_text = info.get('meeting', '')
+        item_text = info.get('text', '')
+        if status == "jira" and ticket:
+            ticket_link = f'<a href="https://{jira_site}/browse/{ticket}" target="_blank">{ticket}</a>'
+            triaged_jira_rows += f"""
+            <tr>
+                <td><span class="badge jira">{ticket_link}</span></td>
+                <td>{meeting_text}</td>
+                <td>{item_text}</td>
+            </tr>"""
+        else:
+            badge_class = {"skip": "skip", "done": "done"}.get(status, "skip")
+            label = status
+            triaged_skip_rows += f"""
+            <tr>
+                <td><span class="badge {badge_class}">{label}</span></td>
+                <td>{meeting_text}</td>
+                <td>{item_text}</td>
+            </tr>"""
+
+    triaged_rows = triaged_jira_rows + triaged_skip_rows
+
+    backlog_tickets = [t for t in tickets if not t.get("sprint") and not t.get("last_sprint")]
+
+    sprint_table = _render_ticket_table(sprint_tickets)
+    last_sprint_table = _render_ticket_table(last_sprint_tickets)
+    backlog_table = _render_ticket_table(backlog_tickets)
+    all_table = _render_ticket_table(tickets)
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Daily Triage Dashboard</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #c9d1d9; padding: 2rem; }}
+        h1 {{ color: #f0f6fc; margin-bottom: 0.5rem; }}
+        .updated {{ color: #8b949e; margin-bottom: 2rem; font-size: 0.9rem; }}
+        h2 {{ color: #f0f6fc; margin: 2rem 0 1rem; border-bottom: 1px solid #30363d; padding-bottom: 0.5rem; }}
+        table {{ width: 100%; border-collapse: collapse; margin-bottom: 1rem; }}
+        th {{ text-align: left; padding: 0.5rem; color: #8b949e; border-bottom: 1px solid #30363d; font-size: 0.85rem; }}
+        td {{ padding: 0.5rem; border-bottom: 1px solid #21262d; font-size: 0.9rem; }}
+        tr:hover {{ background: #161b22; }}
+        .epic-row {{ background: #161b22; }}
+        .child-row td:first-child {{ padding-left: 2rem; }}
+        a {{ color: #58a6ff; text-decoration: none; }}
+        a:hover {{ text-decoration: underline; }}
+        .badge {{ display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; font-weight: 600; }}
+        .badge.new {{ background: #da3633; color: #fff; }}
+        .badge.jira {{ background: #1f6feb; color: #fff; }}
+        .badge.skip {{ background: #30363d; color: #8b949e; }}
+        .badge.done {{ background: #238636; color: #fff; }}
+        .badge[class*="status-"] {{ background: #30363d; color: #c9d1d9; }}
+        .badge.status-in-progress {{ background: #1f6feb; color: #fff; }}
+        .badge.status-new {{ background: #6e7681; color: #fff; }}
+        .badge.status-to-do {{ background: #e3b341; color: #000; }}
+        .badge.status-backlog {{ background: #30363d; color: #8b949e; }}
+        .badge.status-release-pending {{ background: #a371f7; color: #fff; }}
+        .empty {{ color: #8b949e; padding: 1rem; text-align: center; }}
+        h3 {{ color: #c9d1d9; margin: 1.5rem 0 0.5rem; font-size: 0.95rem; }}
+        .toggle {{ cursor: pointer; user-select: none; }}
+        .toggle:hover {{ color: #58a6ff; }}
+        .arrow {{ font-size: 0.7rem; margin-left: 0.3rem; transition: transform 0.2s; display: inline-block; }}
+        .collapsed {{ display: none; }}
+        .collapsed + .arrow {{ transform: rotate(-90deg); }}
+        .tabs {{ display: flex; gap: 0; margin-bottom: 0; }}
+        .tab {{ padding: 0.6rem 1.2rem; cursor: pointer; border: 1px solid #30363d; border-bottom: none; border-radius: 6px 6px 0 0; background: #161b22; color: #8b949e; font-size: 0.9rem; }}
+        .tab.active {{ background: #0d1117; color: #f0f6fc; border-bottom: 1px solid #0d1117; }}
+        .tab-content {{ display: none; border: 1px solid #30363d; border-radius: 0 6px 6px 6px; padding: 1rem; }}
+        .tab-content.active {{ display: block; }}
+    </style>
+</head>
+<body>
+    <h1>Daily Triage Dashboard</h1>
+    <p class="updated">Updated: {now}</p>
+
+    <h2>New Action Items ({len(new_items)})</h2>
+    {"<table><tr><th></th><th>Meeting</th><th>Action Item</th></tr>" + new_rows + "</table>" if new_items else '<p class="empty">No new action items</p>'}
+
+    <h2>Jira Tickets</h2>
+    <div class="tabs">
+        <div class="tab active" onclick="switchTab('sprint')">
+            Current: {sprint_name or 'None'} ({len(sprint_tickets)})
+        </div>
+        <div class="tab" onclick="switchTab('last-sprint')">
+            Last: {last_sprint_name or 'None'} ({len(last_sprint_tickets)})
+        </div>
+        <div class="tab" onclick="switchTab('backlog')">
+            Backlog ({len(backlog_tickets)})
+        </div>
+        <div class="tab" onclick="switchTab('all')">
+            All Open ({len(tickets)})
+        </div>
+    </div>
+    <div id="tab-sprint" class="tab-content active">
+        {sprint_table}
+    </div>
+    <div id="tab-last-sprint" class="tab-content">
+        {last_sprint_table}
+    </div>
+    <div id="tab-backlog" class="tab-content">
+        {backlog_table}
+    </div>
+    <div id="tab-all" class="tab-content">
+        {all_table}
+    </div>
+
+    <h2>
+        <span class="toggle" onclick="document.getElementById('triaged-section').classList.toggle('collapsed'); var a = this.querySelector('.arrow'); a.textContent = a.textContent === '\u25B6' ? '\u25BC' : '\u25B6'">
+            Triaged Action Items ({len(triaged_items)})
+            <span class="arrow">&#9654;</span>
+        </span>
+    </h2>
+    <div id="triaged-section" class="collapsed">
+    {"<h3><span class='toggle' onclick='document.getElementById(\"jira-items\").classList.toggle(\"collapsed\"); this.querySelector(\".arrow\").textContent = this.querySelector(\".arrow\").textContent === \"▶\" ? \"▼\" : \"▶\"'>Linked to Jira (" + str(len([v for v in triaged_items.values() if v.get('status') == 'jira'])) + ") <span class=\"arrow\">▶</span></span></h3><div id=\"jira-items\" class=\"collapsed\"><table><tr><th>Ticket</th><th>Meeting</th><th>Action Item</th></tr>" + triaged_jira_rows + "</table></div>" if triaged_jira_rows else ""}
+    {"<h3><span class='toggle' onclick='document.getElementById(\"skip-items\").classList.toggle(\"collapsed\"); this.querySelector(\".arrow\").textContent = this.querySelector(\".arrow\").textContent === \"▶\" ? \"▼\" : \"▶\"'>Skipped / Ignored (" + str(len([v for v in triaged_items.values() if v.get('status') != 'jira'])) + ") <span class=\"arrow\">▶</span></span></h3><div id=\"skip-items\" class=\"collapsed\"><table><tr><th>Status</th><th>Meeting</th><th>Action Item</th></tr>" + triaged_skip_rows + "</table></div>" if triaged_skip_rows else ""}
+    {"" if triaged_items else '<p class="empty">No triaged items yet</p>'}
+    </div>
+
+    <script>
+    function switchTab(name) {{
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+        document.getElementById('tab-' + name).classList.add('active');
+        event.target.classList.add('active');
+    }}
+    </script>
+</body>
+</html>"""
+
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(DASHBOARD_FILE, "w") as f:
+        f.write(html)
+    return str(DASHBOARD_FILE)
+
+
+def interactive_triage(new_items, state):
+    """Interactively triage new action items."""
+    if not new_items:
+        return
+
+    print()
+    print("=== Triage New Items ===")
+    print("For each item: [s]kip, [j]ira (enter ticket key), [d]one, [enter] to skip for now")
+    print()
+
+    for meeting, date, text, h in new_items:
+        print(f"  [{meeting}]")
+        print(f"  {text}")
+        try:
+            choice = input("  > ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+
+        if not choice:
+            continue
+        elif choice == "s":
+            state["triaged"][h] = {
+                "text": text, "meeting": meeting,
+                "status": "skip", "triaged": datetime.now().isoformat(),
+            }
+        elif choice == "d":
+            state["triaged"][h] = {
+                "text": text, "meeting": meeting,
+                "status": "done", "triaged": datetime.now().isoformat(),
+            }
+        elif choice.startswith("j"):
+            ticket = choice[1:].strip().upper() if len(choice) > 1 else ""
+            if not ticket:
+                ticket = input("  Ticket key: ").strip().upper()
+            state["triaged"][h] = {
+                "text": text, "meeting": meeting,
+                "status": "jira", "ticket": ticket,
+                "triaged": datetime.now().isoformat(),
+            }
+        print()
+
+    save_state(state)
+
+
+def main():
+    state = load_state()
+
+    # Gather data
+    action_data = get_action_items()
+    tickets = get_jira_tickets()
+
+    # Flatten action items and find new ones
+    all_items = []
+    for meeting in action_data:
+        for item_text in meeting["items"]:
+            h = item_hash(item_text)
+            all_items.append((meeting["meeting"], meeting["date"], item_text, h))
+
+    new_items = [(m, d, t, h) for m, d, t, h in all_items if h not in state["triaged"]]
+    triaged = state["triaged"]
+
+    # Welcome mode — just print summary
+    if WELCOME:
+        parts = []
+        if new_items:
+            parts.append(f"{len(new_items)} new action item{'s' if len(new_items) != 1 else ''}")
+        if tickets:
+            parts.append(f"{len(tickets)} open ticket{'s' if len(tickets) != 1 else ''}")
+        if parts:
+            print(f"Daily triage: {', '.join(parts)}")
+            if new_items:
+                for m, d, t, h in new_items:
+                    print(f"  - [{m.replace('Notes: ', '')}] {t[:100]}{'...' if len(t) > 100 else ''}")
+        else:
+            print("Daily triage: all clear")
+        return
+
+    # Full display
+    print("=" * 60)
+    print("  DAILY TRIAGE")
+    print("=" * 60)
+
+    if new_items:
+        print(f"\n--- New Action Items ({len(new_items)}) ---\n")
+        for i, (meeting, date, text, h) in enumerate(new_items, 1):
+            print(f"  {i}. [{meeting}]")
+            print(f"     {text}")
+            print()
+    else:
+        print("\n  No new action items.\n")
+
+    if tickets:
+        # Group tickets
+        epics = {}
+        epic_info = {}
+        standalone = []
+        for t in tickets:
+            if t["type"] == "Epic":
+                epic_info[t["key"]] = t
+                epics.setdefault(t["key"], [])
+            elif t["parent"]:
+                epics.setdefault(t["parent"], []).append(t)
+            else:
+                standalone.append(t)
+
+        print(f"--- Open Jira Tickets ({len(tickets)}) ---\n")
+        for key, children in epics.items():
+            info = epic_info.get(key)
+            if info:
+                print(f"  {info['key']}  [{info['status']}]  {info['summary']}")
+            else:
+                print(f"  {key}  (epic)")
+            for c in children:
+                print(f"    {c['key']}  [{c['status']}]  {c['summary']}")
+        if standalone:
+            print(f"\n  Standalone:")
+            for t in standalone:
+                print(f"    {t['key']}  [{t['status']}]  {t['summary']}")
+        print()
+
+    # Notifications
+    if NOTIFY:
+        if new_items:
+            msg = f"{len(new_items)} new action item{'s' if len(new_items) != 1 else ''}, {len(tickets)} open tickets"
+            macos_notify("Daily Triage", msg)
+        else:
+            macos_notify("Daily Triage", f"All clear. {len(tickets)} open tickets.")
+
+    # HTML dashboard
+    if HTML:
+        path = generate_html(new_items, triaged, tickets)
+        print(f"Dashboard: file://{path}")
+
+    # Interactive triage
+    if INTERACTIVE and new_items and sys.stdin.isatty():
+        interactive_triage(new_items, state)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Extracts your action items from Gemini meeting notes emails.
 
-Usage: my-action-items [DAYS]
+Usage: my-action-items [--json] [DAYS]
 
 Set your name once:
     export GWS_NAME="Your Name"
@@ -10,6 +10,7 @@ Set your name once:
 Examples:
     my-action-items          # last 7 days
     my-action-items 14       # last 14 days
+    my-action-items --json   # JSON output for piping to other scripts
 """
 
 import json
@@ -19,79 +20,96 @@ import sys
 
 NAME = os.environ.get("GWS_NAME")
 if not NAME:
-    print("Error: GWS_NAME environment variable is not set.")
-    print()
-    print("Set it once in your shell profile (~/.zshrc or ~/.bashrc):")
-    print()
-    print('  export GWS_NAME="Your Name"')
-    print()
-    print("Then restart your terminal or run: source ~/.zshrc")
+    print("Error: GWS_NAME environment variable is not set.", file=sys.stderr)
+    print(file=sys.stderr)
+    print("Set it once in your shell profile (~/.zshrc or ~/.bashrc):", file=sys.stderr)
+    print(file=sys.stderr)
+    print('  export GWS_NAME="Your Name"', file=sys.stderr)
+    print(file=sys.stderr)
+    print("Then restart your terminal or run: source ~/.zshrc", file=sys.stderr)
     sys.exit(1)
 
-DAYS = int(sys.argv[1]) if len(sys.argv) > 1 else 7
+JSON_OUTPUT = "--json" in sys.argv
+args = [a for a in sys.argv[1:] if a != "--json"]
+DAYS = int(args[0]) if args else 7
 
 
-def gws(*args):
+def gws(*cmd_args):
     result = subprocess.run(
-        ["gws", *args],
+        ["gws", *cmd_args],
         capture_output=True, text=True,
     )
     return result.stdout
 
 
-# Get message IDs from Gemini meeting notes that mention your name
-query = f'from:gemini-notes@google.com newer_than:{DAYS}d "{NAME}"'
-triage_json = gws("gmail", "+triage", "--query", query, "--max", "50", "--format", "json")
+def extract_action_items():
+    """Returns a list of dicts: {meeting, date, message_id, items: [str]}"""
+    query = f'from:gemini-notes@google.com newer_than:{DAYS}d "{NAME}"'
+    triage_json = gws("gmail", "+triage", "--query", query, "--max", "50", "--format", "json")
 
-if not triage_json.strip():
-    print(f"No action items found in the last {DAYS} days.")
-    sys.exit(0)
+    if not triage_json.strip():
+        return []
 
-messages = json.loads(triage_json).get("messages", [])
-found = False
+    messages = json.loads(triage_json).get("messages", [])
+    results = []
 
-for msg in messages:
-    msg_json = gws("gmail", "+read", "--id", msg["id"], "--format", "json")
-    if not msg_json.strip():
-        continue
+    for msg in messages:
+        msg_json = gws("gmail", "+read", "--id", msg["id"], "--format", "json")
+        if not msg_json.strip():
+            continue
 
-    email = json.loads(msg_json)
-    text = email.get("body_text", "")
-    subject = email.get("subject", "")
-    date = email.get("date", "")
+        email = json.loads(msg_json)
+        text = email.get("body_text", "")
+        subject = email.get("subject", "")
+        date = email.get("date", "")
 
-    start = text.find("Suggested next steps")
-    end = text.find("Meeting records", start if start >= 0 else 0)
+        start = text.find("Suggested next steps")
+        end = text.find("Meeting records", start if start >= 0 else 0)
 
-    if start < 0 or end < 0:
-        continue
+        if start < 0 or end < 0:
+            continue
 
-    section = text[start:end]
+        section = text[start:end]
 
-    # Split action items on blank lines, then join continuation lines
-    items = []
-    current = []
-    for line in section.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped == "Suggested next steps":
-            if current:
-                full = " ".join(current)
-                if NAME in full:
-                    items.append(full)
-                current = []
-        else:
-            current.append(stripped)
-    if current:
-        full = " ".join(current)
-        if NAME in full:
-            items.append(full)
+        # Split action items on blank lines, then join continuation lines
+        items = []
+        current = []
+        for line in section.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped == "Suggested next steps":
+                if current:
+                    full = " ".join(current)
+                    if NAME in full:
+                        items.append(full)
+                    current = []
+            else:
+                current.append(stripped)
+        if current:
+            full = " ".join(current)
+            if NAME in full:
+                items.append(full)
 
-    if items:
-        found = True
-        print(f"{subject} ({date})")
-        for item in items:
-            print(f"  - {item}")
-        print()
+        if items:
+            results.append({
+                "meeting": subject,
+                "date": date,
+                "message_id": msg["id"],
+                "items": items,
+            })
 
-if not found:
-    print(f"No action items found in the last {DAYS} days.")
+    return results
+
+
+if __name__ == "__main__":
+    results = extract_action_items()
+
+    if JSON_OUTPUT:
+        print(json.dumps(results, indent=2))
+    elif not results:
+        print(f"No action items found in the last {DAYS} days.")
+    else:
+        for r in results:
+            print(f"{r['meeting']} ({r['date']})")
+            for item in r["items"]:
+                print(f"  - {item}")
+            print()
