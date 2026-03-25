@@ -19,16 +19,18 @@ After a Google Meet call, Gemini automatically emails meeting notes to participa
 export GWS_NAME="Your Full Name"
 ```
 
-2. Symlink or copy the script somewhere on your PATH:
+2. Install the script:
 
 ```bash
-ln -s $(pwd)/my-action-items ~/bin/my-action-items
+# Quick install
+mkdir -p ~/bin
+curl -o ~/bin/my-action-items https://raw.githubusercontent.com/rut31337/daily-automation-tools/main/my-action-items && chmod +x ~/bin/my-action-items
 ```
 
-3. Make it executable:
+Make sure `~/bin` is in your PATH. Add this to your `~/.zshrc` if it isn't:
 
 ```bash
-chmod +x my-action-items
+export PATH="$HOME/bin:$PATH"
 ```
 
 ### Usage
