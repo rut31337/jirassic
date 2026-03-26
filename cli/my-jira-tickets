@@ -46,8 +46,9 @@ if not JIRA_EMAIL:
 JIRA_SITE = os.environ.get("JIRA_SITE", "redhat.atlassian.net")
 
 JSON_OUTPUT = "--json" in sys.argv
+INCLUDE_CLOSED = "--include-closed" in sys.argv
 PROJECT = None
-args = [a for a in sys.argv[1:] if a != "--json"]
+args = [a for a in sys.argv[1:] if a not in ("--json", "--include-closed")]
 for i, a in enumerate(args):
     if a == "--project" and i + 1 < len(args):
         PROJECT = args[i + 1]
@@ -83,16 +84,40 @@ def jira_request(path, params=None):
 
 
 def get_open_tickets():
-    """Returns a list of dicts: {key, summary, status, priority, type, parent, url}"""
-    jql = "assignee = currentUser() AND status NOT IN (Done, Closed) ORDER BY priority ASC, created DESC"
-    if PROJECT:
-        jql = f"project = {PROJECT} AND {jql}"
+    """Returns open tickets, plus recently closed tickets if --include-closed."""
+    fields = "summary,status,priority,issuetype,parent,customfield_10020,customfield_10028"
+    project_prefix = f"project = {PROJECT} AND " if PROJECT else ""
 
+    # Always fetch open tickets
+    open_jql = f"{project_prefix}assignee = currentUser() AND status NOT IN (Done, Closed) ORDER BY priority ASC, created DESC"
     data = jira_request("/search/jql", {
-        "jql": jql,
-        "fields": "summary,status,priority,issuetype,parent,customfield_10020,customfield_10028",
+        "jql": open_jql,
+        "fields": fields,
         "maxResults": 100,
     })
+    tickets = parse_tickets(data)
+
+    if INCLUDE_CLOSED:
+        # Fetch recently closed tickets (current + last sprint window)
+        closed_jql = f"{project_prefix}assignee = currentUser() AND status IN (Done, Closed) AND updated >= -6w ORDER BY updated DESC"
+        closed_data = jira_request("/search/jql", {
+            "jql": closed_jql,
+            "fields": fields,
+            "maxResults": 100,
+        })
+        closed_tickets = parse_tickets(closed_data)
+        # Deduplicate by key
+        seen = {t["key"] for t in tickets}
+        for t in closed_tickets:
+            if t["key"] not in seen:
+                tickets.append(t)
+                seen.add(t["key"])
+
+    return tickets
+
+
+def parse_tickets(data):
+    """Parse Jira API response into ticket dicts."""
 
     tickets = []
     for issue in data.get("issues", []):
@@ -101,6 +126,7 @@ def get_open_tickets():
         sprints = fields.get("customfield_10020") or []
         active_sprint = None
         last_closed_sprint = None
+        future_sprint = None
         for s in sprints:
             if not isinstance(s, dict):
                 continue
@@ -110,6 +136,10 @@ def get_open_tickets():
                 # Keep the most recent closed sprint (highest ID = most recent)
                 if last_closed_sprint is None or s.get("id", 0) > last_closed_sprint.get("id", 0):
                     last_closed_sprint = s
+            elif s.get("state") == "future":
+                # Keep the earliest future sprint (lowest ID = soonest)
+                if future_sprint is None or s.get("id", 0) < future_sprint.get("id", 0):
+                    future_sprint = s
         priority_name = fields.get("priority", {}).get("name", "Undefined")
         if priority_name == "Undefined":
             priority_name = "—"
@@ -124,6 +154,7 @@ def get_open_tickets():
             "sprint_start": active_sprint.get("startDate") if active_sprint else None,
             "sprint_end": active_sprint.get("endDate") if active_sprint else None,
             "last_sprint": last_closed_sprint.get("name") if last_closed_sprint else None,
+            "future_sprint": future_sprint.get("name") if future_sprint else None,
             "story_points": fields.get("customfield_10028"),
             "url": f"https://{JIRA_SITE}/browse/{issue['key']}",
         })
