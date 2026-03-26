@@ -629,7 +629,7 @@ const server = http.createServer(async (req, res) => {
     // Check GWS
     try {
       const { execFileSync } = require("child_process");
-      const out = execFileSync("gws", ["auth", "status", "--format", "json"], { timeout: 10000, encoding: "utf8" });
+      const out = execFileSync("gws", ["auth", "status"], { timeout: 10000, encoding: "utf8" });
       const data = JSON.parse(out);
       results.gws = { ok: data.token_valid === true, user: data.user || "" };
     } catch (e) {
