@@ -17,17 +17,23 @@ import json
 import os
 import subprocess
 import sys
+from email.utils import parsedate_to_datetime
 
-NAME = os.environ.get("GWS_NAME")
-if not NAME:
+GWS_NAME_RAW = os.environ.get("GWS_NAME", "")
+if not GWS_NAME_RAW:
     print("Error: GWS_NAME environment variable is not set.", file=sys.stderr)
     print(file=sys.stderr)
     print("Set it once in your shell profile (~/.zshrc or ~/.bashrc):", file=sys.stderr)
     print(file=sys.stderr)
     print('  export GWS_NAME="Your Name"', file=sys.stderr)
+    print("  # Multiple names: export GWS_NAME=\"Full Name:FirstName:username\"", file=sys.stderr)
     print(file=sys.stderr)
     print("Then restart your terminal or run: source ~/.zshrc", file=sys.stderr)
     sys.exit(1)
+
+# Support colon-separated list of names to match
+NAMES = [n.strip() for n in GWS_NAME_RAW.split(":") if n.strip()]
+NAME = NAMES[0]  # Primary name used for Gmail search
 
 JSON_OUTPUT = "--json" in sys.argv
 args = [a for a in sys.argv[1:] if a != "--json"]
@@ -79,14 +85,14 @@ def extract_action_items():
             if not stripped or stripped == "Suggested next steps":
                 if current:
                     full = " ".join(current)
-                    if NAME in full:
+                    if any(n in full for n in NAMES):
                         items.append(full)
                     current = []
             else:
                 current.append(stripped)
         if current:
             full = " ".join(current)
-            if NAME in full:
+            if any(n in full for n in NAMES):
                 items.append(full)
 
         if items:
@@ -96,6 +102,14 @@ def extract_action_items():
                 "message_id": msg["id"],
                 "items": items,
             })
+
+    # Sort by date, newest first
+    def parse_date(r):
+        try:
+            return parsedate_to_datetime(r["date"])
+        except Exception:
+            return None
+    results.sort(key=lambda r: parse_date(r) or "", reverse=True)
 
     return results
 

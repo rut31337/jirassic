@@ -4,8 +4,8 @@
   "description": "Daily triage dashboard — action items from Gemini meeting notes + Jira tickets",
   "private": true,
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
+    "start": "node jirassic-server.js",
+    "dev": "node --watch jirassic-server.js"
   },
   "dependencies": {
     "ws": "^8.18.0"

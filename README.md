@@ -1,56 +1,41 @@
-# daily-automation-tools
+# Jirassic — Daily Triage Dashboard
 
-Personal automation scripts for daily workflows — track action items from Google Meet notes and reconcile with Jira tickets.
+Track action items from Google Meet notes and reconcile with Jira tickets. Includes a live web dashboard with interactive triage, inline ticket editing, and real-time updates.
 
-## Scripts
+![Dashboard](https://img.shields.io/badge/port-31337-blue) ![Node.js](https://img.shields.io/badge/node.js-18+-green) ![Python](https://img.shields.io/badge/python-3-blue)
 
-### my-action-items
+## What it does
 
-After a Google Meet call, Gemini automatically emails meeting notes to participants, including a "Suggested next steps" section with action items. This script pulls those emails from your Gmail and extracts just the action items assigned to you.
+1. **Pulls action items** from Gemini meeting notes in your Gmail
+2. **Pulls Jira tickets** assigned to you, grouped by epic and sprint
+3. **Lets you triage** — skip, mark done, link to existing ticket, or create new Jira tickets
+4. **Live dashboard** at `localhost:31337` with WebSocket updates, auto-refresh, and inline editing
 
-### my-jira-tickets
+## Quick Start
 
-Lists your open Jira tickets, grouped by epic. Useful for seeing your full workload at a glance.
-
-### my-daily-triage
-
-Combines action items and Jira tickets into a daily triage workflow. Tracks which items you've already reviewed so you only see new ones. Includes an interactive mode to mark items as done, skipped, or linked to a Jira ticket.
-
-Features:
-- macOS notifications (`--notify`)
-- Static HTML dashboard (`--html`)
-- Shell/Claude welcome message (`--welcome`)
-- Interactive triage prompts
-
-## Prerequisites
+### Prerequisites
 
 - Python 3
+- Node.js 18+
 - [Google Workspace CLI (gws)](https://github.com/googleworkspace/cli) — installed and authenticated with Gmail access
 
-## Setup
+### 1. Clone and install
 
-### 1. Set your name
+```bash
+git clone https://github.com/rut31337/daily-automation-tools.git ~/daily-automation-tools
+cd ~/daily-automation-tools
+npm install
+```
 
-Add to your `~/.zshrc` (or `~/.bashrc`):
+### 2. Set your name
+
+Add to your `~/.env`:
 
 ```bash
 export GWS_NAME="Your Full Name"
-```
-
-Your name should match how Gemini refers to you in meeting notes.
-
-### 2. Create a Jira API token
-
-1. Go to: https://id.atlassian.com/manage-profile/security/api-tokens
-2. Click **Create API token**
-3. Label it (e.g., `daily-triage`)
-4. Copy the token
-
-Add to your `~/.env` (or wherever you store secrets):
-
-```bash
-export JIRA_EMAIL="you@example.com"
-export JIRA_API_TOKEN="your-token-here"
+# Multiple name variants (colon-separated):
+export GWS_NAME="Full Name:FirstName:username:Nick "
+# Trailing space prevents false matches (e.g., "Pat " won't match "Pattern")
 ```
 
 Make sure `~/.env` is sourced from your shell profile:
@@ -60,80 +45,106 @@ Make sure `~/.env` is sourced from your shell profile:
 source ~/.env
 ```
 
-**Note:** Atlassian API tokens do not expire by default. Check your org's policy and manage tokens at https://id.atlassian.com/manage-profile/security/api-tokens.
+### 3. Create a Jira API token
 
-### 3. Install the scripts
+1. Go to: https://id.atlassian.com/manage-profile/security/api-tokens
+2. Click **Create API token**
+3. Add to your `~/.env`:
 
-**Option A: Quick install**
+```bash
+export JIRA_EMAIL="you@example.com"
+export JIRA_API_TOKEN="your-token-here"
+```
+
+**Note:** Atlassian API tokens do not expire by default. Some organizations enforce rotation — check your org's policy.
+
+### 4. Symlink the scripts
 
 ```bash
 mkdir -p ~/bin
-for script in my-action-items my-jira-tickets my-daily-triage; do
-  curl -o ~/bin/$script https://raw.githubusercontent.com/rut31337/daily-automation-tools/main/$script
-  chmod +x ~/bin/$script
+for script in my-action-items my-jira-tickets my-daily-triage jirassic; do
+  ln -sf ~/daily-automation-tools/$script ~/bin/$script
 done
 ```
 
-**Option B: Clone the repo**
+### 5. Start the dashboard
 
 ```bash
-git clone https://github.com/rut31337/daily-automation-tools.git ~/daily-automation-tools
-mkdir -p ~/bin
-for script in my-action-items my-jira-tickets my-daily-triage; do
-  ln -s ~/daily-automation-tools/$script ~/bin/$script
-done
+jirassic start
+# or: jirassic open  (starts and opens browser)
 ```
 
-Make sure `~/bin` is in your PATH:
+Dashboard: http://localhost:31337
+
+## Scripts
+
+| Script | Description |
+|--------|-------------|
+| `jirassic` | Start/stop/restart the dashboard server |
+| `my-action-items` | Extract action items from Gemini meeting notes |
+| `my-jira-tickets` | List open Jira tickets grouped by epic |
+| `my-daily-triage` | CLI triage tool (terminal alternative to dashboard) |
+
+## Dashboard Features
+
+- **Action item triage** — Skip, Done, Create Jira Ticket, or Link to existing ticket
+- **Jira ticket management** — view by sprint (current, last, backlog, all)
+- **Inline editing** — click to change status, priority, summary, or story points
+- **Epic grouping** — collapsible epics with child count and story point totals
+- **Missing story points** — ⚠️ warnings on tasks, count badge on epics
+- **Create tickets** — under epics or standalone, with assign and story point options
+- **Live updates** — WebSocket + auto-refresh every 60 seconds
+- **Light/dark theme** — toggle in top right, persisted
+- **Config page** — manage Jira credentials and GWS name variants at `/config`
+
+## Managing the Server
 
 ```bash
-export PATH="$HOME/bin:$PATH"
+jirassic start     # Start the dashboard server
+jirassic stop      # Stop the server
+jirassic restart   # Restart the server
+jirassic status    # Check if running
+jirassic open      # Start (if needed) and open in browser
 ```
 
-## Usage
+The server runs with `--watch` mode — code changes to `jirassic-server.js` auto-restart it.
+
+## CLI Usage
 
 ```bash
-# Show your action items from the last 7 days
+# Action items from the last 7 days
 my-action-items
 
-# Show your open Jira tickets
+# Action items as JSON
+my-action-items --json 14
+
+# Open Jira tickets
 my-jira-tickets
 my-jira-tickets --project MYPROJ
 
-# Full daily triage — interactive
+# Terminal triage
 my-daily-triage
+my-daily-triage --notify --project MYPROJ
 
-# Daily triage with all the bells and whistles
-my-daily-triage --notify --html --project MYPROJ
-
-# One-liner for shell welcome
+# Shell welcome (add to ~/.zshrc)
 my-daily-triage --welcome --no-interactive
 ```
 
-## Optional: Shell welcome
+## Configuration
 
-Add to your `~/.zshrc` to see your triage summary when you open a terminal:
+Visit http://localhost:31337/config to manage:
 
-```bash
-my-daily-triage --welcome --no-interactive 2>/dev/null
-```
+- **Jira** — email, API token, site URL (saved to `~/.env`)
+- **GWS** — name variants for meeting note matching
+- **Connection status** — verify Jira and GWS connectivity
 
-## Optional: macOS notification (cron)
+## Environment Variables
 
-Run daily at 9am:
-
-```bash
-crontab -e
-# Add:
-0 9 * * * source ~/.env && source ~/.zshrc && ~/bin/my-daily-triage --notify --html --no-interactive --project MYPROJ
-```
-
-## Dashboard
-
-When you run `my-daily-triage --html`, a static HTML dashboard is generated at:
-
-```
-~/.config/daily-triage/dashboard.html
-```
-
-Open it in your browser: `open ~/.config/daily-triage/dashboard.html`
+| Variable | Description | Location |
+|----------|-------------|----------|
+| `GWS_NAME` | Colon-separated name variants | `~/.env` |
+| `JIRA_EMAIL` | Atlassian account email | `~/.env` |
+| `JIRA_API_TOKEN` | Jira API token | `~/.env` |
+| `JIRA_SITE` | Jira hostname (default: `redhat.atlassian.net`) | `~/.env` |
+| `TRIAGE_PROJECT` | Default project filter (default: `GPTEINFRA`) | `~/.env` or env |
+| `TRIAGE_DAYS` | Default lookback days (default: `7`) | `~/.env` or env |

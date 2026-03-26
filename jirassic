@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Manage the Daily Triage Dashboard server
-# Usage: triaged start|stop|restart|status|open
+# Usage: jirassic start|stop|restart|status|open
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$0")")" && pwd)"
 PID_FILE="$HOME/.config/daily-triage/server.pid"
@@ -16,7 +16,7 @@ start() {
     return
   fi
 
-  cd "$SCRIPT_DIR"
+  cd "$SCRIPT_DIR/server"
 
   # Install deps if needed
   if [ ! -d node_modules ]; then
@@ -25,13 +25,13 @@ start() {
   fi
 
   # Source env for secrets
-  [ -f "$HOME/.env" ] && export $(grep -v '^#' "$HOME/.env" | xargs)
-  [ -f "$HOME/.zshrc" ] && eval "$(grep '^export GWS_NAME' "$HOME/.zshrc")"
+  [ -f "$HOME/.env" ] && source "$HOME/.env"
 
   export TRIAGE_PROJECT="${TRIAGE_PROJECT:-GPTEINFRA}"
   export TRIAGE_DAYS="${TRIAGE_DAYS:-7}"
+  export PROJECT_ROOT="$SCRIPT_DIR"
 
-  nohup node server.js > "$LOG_FILE" 2>&1 &
+  nohup node --watch jirassic-server.js > "$LOG_FILE" 2>&1 &
   echo $! > "$PID_FILE"
   echo "Started (PID $!)"
   echo "Dashboard: http://localhost:$PORT"
@@ -83,7 +83,7 @@ case "${1:-}" in
   status)  status ;;
   open)    open_dashboard ;;
   *)
-    echo "Usage: triaged {start|stop|restart|status|open}"
+    echo "Usage: jirassic {start|stop|restart|status|open}"
     echo ""
     echo "Commands:"
     echo "  start    Start the dashboard server"

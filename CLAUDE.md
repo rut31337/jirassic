@@ -1,50 +1,85 @@
-# daily-automation-tools
+# daily-automation-tools (Jirassic)
 
-Personal automation scripts for daily workflows — action item tracking from Gemini meeting notes, Jira ticket management, and daily triage.
+Personal automation scripts for daily workflows — action item tracking from Gemini meeting notes, Jira ticket management, and daily triage with a live web dashboard.
 
-## Scripts
+## Architecture
+
+```
+Browser (localhost:31337)
+    ↕ WebSocket (live updates, auto-refresh every 60s)
+jirassic-server.js (Node.js)
+    → my-action-items --json (Python, calls gws CLI for Gmail)
+    → my-jira-tickets --json (Python, calls Jira REST API)
+    → ~/.config/daily-triage/state.json (triage state)
+    → ~/.config/daily-triage/cache.json (data cache for fast rebuilds)
+```
+
+## Files
+
+### jirassic-server.js
+Node.js server that powers the Jirassic web dashboard. Contains all HTML/CSS/JS inline (no separate frontend files). Key features:
+- WebSocket for live updates
+- Auto-refresh every 60 seconds
+- REST API for triage actions, Jira CRUD, health checks, config management
+- Dashboard page (`/`) and config page (`/config`)
+- Light/dark theme toggle (persisted in localStorage)
+- Collapsible epics with story point tracking
+- Inline editing of ticket status, priority, summary, story points
+- Triage modal with create/link Jira ticket workflow
+
+### jirassic
+Bash script to start/stop/restart the server. Usage: `jirassic start|stop|restart|status|open`
+- Sources `~/.env` for secrets
+- Runs with `node --watch` so code changes auto-restart the server
+- PID file at `~/.config/daily-triage/server.pid`
+- Logs at `~/.config/daily-triage/server.log`
 
 ### my-action-items
-Extracts action items assigned to the user from Gemini meeting notes emails via the Google Workspace CLI (gws). Parses the "Suggested next steps" section from `gemini-notes@google.com` emails.
-
+Python script that extracts action items from Gemini meeting notes emails via gws CLI.
 - Requires: `gws` CLI installed and authenticated, `GWS_NAME` env var
+- `GWS_NAME` supports colon-separated list of name variants (e.g., `Full Name:First:username:Nick `)
+- Trailing space in a name prevents false matches (e.g., "Pat " won't match "Pattern")
 - Supports `--json` output for piping to other scripts
-- Usage: `my-action-items [--json] [DAYS]`
+- Sorts results by date/time, newest first
 
 ### my-jira-tickets
-Lists open Jira tickets assigned to the user via the Jira REST API. Groups tickets by epic.
-
+Python script that lists open Jira tickets via REST API. Groups by epic with sprint detection.
 - Requires: `JIRA_API_TOKEN` and `JIRA_EMAIL` env vars
-- Uses the `/rest/api/3/search/jql` endpoint (not the deprecated `/search`)
+- Uses `/rest/api/3/search/jql` endpoint
+- Returns sprint, last_sprint, story_points, parent epic info
 - Supports `--json` output and `--project` filter
-- Usage: `my-jira-tickets [--json] [--project PROJECT]`
 
 ### my-daily-triage
-Orchestrator that combines action items and Jira tickets into a daily triage workflow. Tracks which action items have been triaged in a local state file.
-
+Python CLI orchestrator (kept for terminal/cron usage alongside the web dashboard).
 - Calls `my-action-items --json` and `my-jira-tickets --json` as subprocesses
-- State file: `~/.config/daily-triage/state.json` — tracks triaged items by content hash
-- Interactive mode: prompts user to mark items as skip/done/jira
-- Flags:
-  - `--notify` — macOS notification
-  - `--html` — generates dashboard at `~/.config/daily-triage/dashboard.html`
-  - `--welcome` — one-liner summary for shell/Claude welcome
-  - `--no-interactive` — skip triage prompts
-  - `--days N` — lookback period (default: 7)
-  - `--project PROJ` — Jira project filter
+- State file: `~/.config/daily-triage/state.json`
+- Flags: `--notify`, `--welcome`, `--no-interactive`, `--days N`, `--project PROJ`
 
 ## Environment Variables
 
-All secrets are in `~/.env` (sourced from `~/.zshrc`):
+All in `~/.env` (sourced from `~/.zshrc`):
 
-- `GWS_NAME` — user's full name as Gemini refers to them (in `~/.zshrc`)
-- `JIRA_API_TOKEN` — Jira personal API token (in `~/.env`)
-- `JIRA_EMAIL` — Jira account email (in `~/.env`)
-- `JIRA_SITE` — Jira instance (default: `redhat.atlassian.net`)
+- `GWS_NAME` — colon-separated name variants for matching in meeting notes
+- `JIRA_API_TOKEN` — Jira personal API token
+- `JIRA_EMAIL` — Jira account email
+- `JIRA_SITE` — Jira instance hostname (default: `redhat.atlassian.net`)
+- `TRIAGE_PROJECT` — default Jira project filter (default: `GPTEINFRA`)
+- `TRIAGE_DAYS` — default lookback days (default: `7`)
+
+Config page at `/config` can manage Jira settings and GWS name variants.
+
+## Jira Integration Details
+
+- Assignee ID is hardcoded: `70121:df364920-a6d0-46a4-8bed-6fab302f6e71` (prutledg@redhat.com)
+- Story points field: `customfield_10028`
+- Sprint field: `customfield_10020`
+- Project default: `GPTEINFRA`
+- Status changes use transitions API, not direct field updates
 
 ## Important Notes
 
-- This is a public repo — never commit secrets, tokens, or internal URLs
-- The Jira script uses basic auth with API tokens, not OAuth
-- Action items are matched by content hash — if Gemini rephrases the same item in a different meeting, it will appear as new
-- The state file only tracks items the user has explicitly triaged
+- Public repo — never commit secrets, tokens, or internal URLs
+- Action items matched by SHA-256 content hash (first 16 chars)
+- Triage state persists across server restarts via state.json
+- Cache stores raw API responses for instant triage/untriage without re-fetching
+- @redhat.com users see additional warnings about token expiry and GWS setup docs

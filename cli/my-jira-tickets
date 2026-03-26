@@ -90,7 +90,7 @@ def get_open_tickets():
 
     data = jira_request("/search/jql", {
         "jql": jql,
-        "fields": "summary,status,priority,issuetype,parent,customfield_10020",
+        "fields": "summary,status,priority,issuetype,parent,customfield_10020,customfield_10028",
         "maxResults": 100,
     })
 
@@ -105,7 +105,7 @@ def get_open_tickets():
             if not isinstance(s, dict):
                 continue
             if s.get("state") == "active":
-                active_sprint = s.get("name")
+                active_sprint = s
             elif s.get("state") == "closed":
                 # Keep the most recent closed sprint (highest ID = most recent)
                 if last_closed_sprint is None or s.get("id", 0) > last_closed_sprint.get("id", 0):
@@ -120,8 +120,11 @@ def get_open_tickets():
             "priority": priority_name,
             "type": fields["issuetype"]["name"],
             "parent": parent["key"] if parent else None,
-            "sprint": active_sprint,
+            "sprint": active_sprint.get("name") if active_sprint else None,
+            "sprint_start": active_sprint.get("startDate") if active_sprint else None,
+            "sprint_end": active_sprint.get("endDate") if active_sprint else None,
             "last_sprint": last_closed_sprint.get("name") if last_closed_sprint else None,
+            "story_points": fields.get("customfield_10028"),
             "url": f"https://{JIRA_SITE}/browse/{issue['key']}",
         })
 
