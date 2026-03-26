@@ -1780,7 +1780,7 @@ function getDashboardHTML() {
         if (result.ok) {
           showToast('Created ' + result.key);
           overlay.remove();
-          fetch('/api/refresh', { method: 'POST' });
+          setTimeout(() => fetch('/api/refresh', { method: 'POST' }), 1500);
         } else {
           showToast('Error: ' + (result.error || 'unknown'));
         }
