@@ -15,6 +15,25 @@ const CACHE_FILE = path.join(STATE_DIR, "cache.json");
 const PYTHON = "python3";
 const JIRA_SITE = process.env.JIRA_SITE || "redhat.atlassian.net";
 
+// Cache the current Jira user's account ID (resolved on first use)
+let jiraAccountId = null;
+async function getJiraAccountId() {
+  if (jiraAccountId) return jiraAccountId;
+  const email = process.env.JIRA_EMAIL;
+  const token = process.env.JIRA_API_TOKEN;
+  if (!email || !token) return null;
+  const auth = Buffer.from(`${email}:${token}`).toString("base64");
+  const resp = await fetch(`https://${JIRA_SITE}/rest/api/3/myself`, {
+    headers: { Authorization: `Basic ${auth}`, Accept: "application/json" },
+  });
+  if (resp.ok) {
+    const data = await resp.json();
+    jiraAccountId = data.accountId;
+    return jiraAccountId;
+  }
+  return null;
+}
+
 fs.mkdirSync(STATE_DIR, { recursive: true });
 
 // --- State management ---
@@ -419,7 +438,8 @@ const server = http.createServer(async (req, res) => {
         issuetype: { name: "Epic" },
       };
       if (assignToMe !== false) {
-        fields.assignee = { id: "70121:df364920-a6d0-46a4-8bed-6fab302f6e71" };
+        const accountId = await getJiraAccountId();
+        if (accountId) fields.assignee = { id: accountId };
       }
       if (priority) fields.priority = { name: priority };
 
@@ -662,7 +682,8 @@ const server = http.createServer(async (req, res) => {
         issuetype: { name: "Task" },
       };
       if (assignToMe !== false) {
-        fields.assignee = { id: "70121:df364920-a6d0-46a4-8bed-6fab302f6e71" };
+        const accountId = await getJiraAccountId();
+        if (accountId) fields.assignee = { id: accountId };
       }
       if (epicKey) fields.parent = { key: epicKey };
       if (storyPoints) fields.customfield_10028 = parseFloat(storyPoints);
@@ -2271,15 +2292,16 @@ function getDashboardHTML() {
       html += '</div></div>';
       html += '</div>';
       html += '<div class="tabs">';
-      html += '<div class="tab' + (activeTab === 'sprint' ? ' active' : '') + '" data-tab="sprint">Current: ' + esc(sprintName || 'None') + ' (' + sprintTickets.length + ')</div>';
+      const countTasks = (arr) => arr.filter(t => t.type !== 'Epic').length;
+      html += '<div class="tab' + (activeTab === 'sprint' ? ' active' : '') + '" data-tab="sprint">Current: ' + esc(sprintName || 'None') + ' (' + countTasks(sprintTickets) + ')</div>';
       const fs = futureSprints || [];
       for (let i = 0; i < fs.length; i++) {
         const tabId = 'future-' + i;
-        html += '<div class="tab' + (activeTab === tabId ? ' active' : '') + '" data-tab="' + tabId + '">Next: ' + esc(fs[i].name) + ' (' + fs[i].tickets.length + ')</div>';
+        html += '<div class="tab' + (activeTab === tabId ? ' active' : '') + '" data-tab="' + tabId + '">Next: ' + esc(fs[i].name) + ' (' + countTasks(fs[i].tickets) + ')</div>';
       }
-      html += '<div class="tab' + (activeTab === 'last-sprint' ? ' active' : '') + '" data-tab="last-sprint">Last: ' + esc(lastSprintName || 'None') + ' (' + lastSprintTickets.length + ')</div>';
-      html += '<div class="tab' + (activeTab === 'backlog' ? ' active' : '') + '" data-tab="backlog">Backlog (' + backlogTickets.length + ')</div>';
-      html += '<div class="tab' + (activeTab === 'all' ? ' active' : '') + '" data-tab="all">All Open (' + tickets.length + ')</div>';
+      html += '<div class="tab' + (activeTab === 'last-sprint' ? ' active' : '') + '" data-tab="last-sprint">Last: ' + esc(lastSprintName || 'None') + ' (' + countTasks(lastSprintTickets) + ')</div>';
+      html += '<div class="tab' + (activeTab === 'backlog' ? ' active' : '') + '" data-tab="backlog">Backlog (' + countTasks(backlogTickets) + ')</div>';
+      html += '<div class="tab' + (activeTab === 'all' ? ' active' : '') + '" data-tab="all">All Open (' + countTasks(tickets) + ')</div>';
       html += '</div>';
       // Sprint progress bar
       let sprintProgressHtml = '';

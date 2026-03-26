@@ -70,7 +70,7 @@ Config page at `/config` can manage Jira settings and GWS name variants.
 
 ## Jira Integration Details
 
-- Assignee ID is hardcoded: `70121:df364920-a6d0-46a4-8bed-6fab302f6e71` (prutledg@redhat.com)
+- Assignee ID is resolved dynamically via `/rest/api/3/myself` (cached after first call)
 - Story points field: `customfield_10028`
 - Sprint field: `customfield_10020`
 - Project default: `GPTEINFRA`
