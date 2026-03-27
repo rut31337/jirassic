@@ -4,6 +4,12 @@ Track action items from Google Meet notes and reconcile with Jira tickets. Inclu
 
 ![Dashboard](https://img.shields.io/badge/port-31337-blue) ![Node.js](https://img.shields.io/badge/node.js-18+-green) ![Python](https://img.shields.io/badge/python-3-blue)
 
+## Screenshots
+
+| Dark Theme | Light Theme |
+|:---:|:---:|
+| ![Dark Theme](assets/screenshot-dark.png) | ![Light Theme](assets/screenshot-light.png) |
+
 ## What it does
 
 1. **Pulls action items** from Gemini meeting notes in your Gmail
