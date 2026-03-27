@@ -65,6 +65,8 @@ All in `~/.env` (sourced from `~/.zshrc`):
 - `JIRA_SITE` — Jira instance hostname (default: `redhat.atlassian.net`)
 - `TRIAGE_PROJECT` — default Jira project filter (default: `GPTEINFRA`)
 - `TRIAGE_DAYS` — default lookback days (default: `7`)
+- `TRIAGE_SPRINTS` — set to `false` to disable sprint tabs and show flat ticket list
+- `TRIAGE_NOTIFICATIONS` — set to `false` to disable macOS notifications for new action items (auto-disabled on non-macOS)
 
 Config page at `/config` can manage Jira settings and GWS name variants.
 

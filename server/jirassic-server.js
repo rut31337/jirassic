@@ -14,6 +14,7 @@ const STATE_FILE = path.join(STATE_DIR, "state.json");
 const CACHE_FILE = path.join(STATE_DIR, "cache.json");
 const PYTHON = "python3";
 const JIRA_SITE = process.env.JIRA_SITE || "redhat.atlassian.net";
+const IS_MACOS = process.platform === "darwin";
 
 // Cache the current Jira user's account ID (resolved on first use)
 let jiraAccountId = null;
@@ -94,12 +95,12 @@ function runScript(name, args = []) {
   });
 }
 
-async function fetchAllData() {
+async function fetchAllData(overrideDays) {
   const project = process.env.TRIAGE_PROJECT || "";
-  const days = process.env.TRIAGE_DAYS || "7";
+  const days = overrideDays || process.env.TRIAGE_DAYS || "7";
 
   const [actionItems, tickets] = await Promise.all([
-    runScript("my-action-items", ["--json", days]),
+    runScript("my-action-items", ["--json", String(days)]),
     runScript("my-jira-tickets", [
       "--json",
       "--include-closed",
@@ -211,6 +212,7 @@ function buildData(actionItems, tickets) {
     lastSprintName,
     futureSprints,
     backlogTickets,
+    sprintsEnabled: process.env.TRIAGE_SPRINTS !== "false",
     updated: new Date().toISOString(),
   };
 }
@@ -259,8 +261,11 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === "POST" && req.url === "/api/refresh") {
-    const data = await fetchAllData();
+  if (req.method === "POST" && (req.url === "/api/refresh" || req.url.startsWith("/api/refresh?"))) {
+    const params = new URL(req.url, "http://localhost").searchParams;
+    const overrideDays = params.get("days");
+    const data = await fetchAllData(overrideDays);
+    notifyNewActionItems(data);
     broadcast({ type: "refresh", data });
     json({ ok: true });
     return;
@@ -569,6 +574,10 @@ const server = http.createServer(async (req, res) => {
       JIRA_API_TOKEN_SET: !!envVars.JIRA_API_TOKEN,
       JIRA_SITE: envVars.JIRA_SITE || process.env.JIRA_SITE || "redhat.atlassian.net",
       GWS_NAME: envVars.GWS_NAME || process.env.GWS_NAME || "",
+      TRIAGE_SPRINTS: envVars.TRIAGE_SPRINTS || process.env.TRIAGE_SPRINTS || "true",
+      TRIAGE_NOTIFICATIONS: envVars.TRIAGE_NOTIFICATIONS || process.env.TRIAGE_NOTIFICATIONS || "true",
+      TRIAGE_PROJECT: envVars.TRIAGE_PROJECT || process.env.TRIAGE_PROJECT || "",
+      TRIAGE_DAYS: envVars.TRIAGE_DAYS || process.env.TRIAGE_DAYS || "7",
     });
     return;
   }
@@ -873,6 +882,37 @@ function getConfigHTML() {
     </div>
   </div>
 
+  <h2>Dashboard Settings</h2>
+  <div class="field">
+    <label>Sprint Tabs</label>
+    <div class="desc">Show sprint tabs (Current, Next, Last) on the dashboard. Disable if your project doesn't use sprints.</div>
+    <select id="cfg-sprints" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:6px;font-size:0.9rem;">
+      <option value="true">Enabled</option>
+      <option value="false">Disabled</option>
+    </select>
+  </div>
+  <div class="field">
+    <label>Desktop Notifications</label>
+    <div class="desc">Show macOS notifications when new action items are detected. Only works on macOS.</div>
+    <select id="cfg-notifications" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:6px;font-size:0.9rem;">
+      <option value="true">Enabled</option>
+      <option value="false">Disabled</option>
+    </select>
+  </div>
+  <div class="field">
+    <label>TRIAGE_PROJECT</label>
+    <div class="desc">Default Jira project filter (leave empty for all projects)</div>
+    <input type="text" id="cfg-project" placeholder="e.g. GPTEINFRA" autocomplete="off">
+  </div>
+  <div class="field">
+    <label>TRIAGE_DAYS</label>
+    <div class="desc">How many days of meeting notes to search</div>
+    <input type="text" id="cfg-days" placeholder="7" autocomplete="off" style="max-width:80px;">
+  </div>
+  <div class="actions">
+    <button class="btn btn-primary" id="save-dashboard">Save Dashboard Settings</button>
+  </div>
+
   <div class="toast" id="toast"></div>
 
   <script>
@@ -957,6 +997,12 @@ function getConfigHTML() {
       document.getElementById('jira-em').value = config.JIRA_EMAIL || '';
       document.getElementById('jira-site').value = config.JIRA_SITE || '';
       renderNameList(config.GWS_NAME || '');
+
+      // Dashboard settings
+      document.getElementById('cfg-sprints').value = config.TRIAGE_SPRINTS === 'false' ? 'false' : 'true';
+      document.getElementById('cfg-notifications').value = config.TRIAGE_NOTIFICATIONS === 'false' ? 'false' : 'true';
+      document.getElementById('cfg-project').value = config.TRIAGE_PROJECT || '';
+      document.getElementById('cfg-days').value = config.TRIAGE_DAYS || '7';
 
       if (config.JIRA_API_TOKEN_SET) {
         document.getElementById('jira-token').placeholder = 'Token set (' + config.JIRA_API_TOKEN + ')';
@@ -1051,6 +1097,27 @@ function getConfigHTML() {
         document.getElementById('jira-dot').className = 'status-dot err';
         document.getElementById('jira-status').textContent = 'Failed: ' + (health.jira?.error || 'unknown');
         showToast('Connection failed');
+      }
+    });
+
+    document.getElementById('save-dashboard').addEventListener('click', async () => {
+      const updates = {
+        TRIAGE_SPRINTS: document.getElementById('cfg-sprints').value,
+        TRIAGE_NOTIFICATIONS: document.getElementById('cfg-notifications').value,
+        TRIAGE_PROJECT: document.getElementById('cfg-project').value.trim(),
+        TRIAGE_DAYS: document.getElementById('cfg-days').value.trim() || '7',
+      };
+      const resp = await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+      });
+      const result = await resp.json();
+      if (result.ok) {
+        showToast('Dashboard settings saved');
+        fetch('/api/refresh', { method: 'POST' });
+      } else {
+        showToast('Error: ' + (result.error || 'unknown'));
       }
     });
 
@@ -1192,7 +1259,11 @@ function getDashboardHTML() {
   <div class="header">
     <img src="/logo.png" alt="Jirassic" style="height:120px;vertical-align:middle">
     <span style="font-size:1.2em;color:#8b949e;vertical-align:middle">Daily Triage Dashboard</span>
-    <button class="refresh-btn" id="refresh-btn">Refresh Now</button>
+    <span style="display:inline-flex;align-items:center;gap:0.3rem;">
+      <input type="number" id="days-input" min="1" max="90" placeholder="${process.env.TRIAGE_DAYS || '7'}" title="Days to search" style="width:45px;padding:4px 6px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:0.85rem;text-align:center;">
+      <span style="color:var(--text-muted);font-size:0.8rem;">days</span>
+      <button class="refresh-btn" id="refresh-btn">Refresh</button>
+    </span>
     <span><span class="status-dot" id="ws-status"></span><span id="ws-label">connecting</span></span>
     <span style="margin-left:0.5rem"><span class="status-dot" id="jira-status"></span><span id="jira-label">Confirming Jira connectivity...</span></span>
     <span style="margin-left:0.5rem"><span class="status-dot" id="gws-status"></span><span id="gws-label">Confirming GWS connectivity...</span></span>
@@ -1303,11 +1374,15 @@ function getDashboardHTML() {
     // --- API ---
     document.getElementById('refresh-btn').onclick = async () => {
       const btn = document.getElementById('refresh-btn');
+      const daysInput = document.getElementById('days-input');
+      const days = daysInput.value.trim();
+      const url = days ? '/api/refresh?days=' + encodeURIComponent(days) : '/api/refresh';
       btn.classList.add('loading');
       btn.textContent = 'Refreshing...';
-      await fetch('/api/refresh', { method: 'POST' });
+      await fetch(url, { method: 'POST' });
       btn.classList.remove('loading');
-      btn.textContent = 'Refresh Now';
+      btn.textContent = 'Refresh';
+      if (days) daysInput.value = ''; // Clear override after use
     };
 
     async function triageItem(hash, status, ticket, text, meeting) {
@@ -2291,40 +2366,46 @@ function getDashboardHTML() {
       for (const p of allPriorities) html += '<label><input type="checkbox" value="' + esc(p) + '"' + (ticketPriorityFilters.has(p) ? ' checked' : '') + '>' + esc(p) + '</label>';
       html += '</div></div>';
       html += '</div>';
-      html += '<div class="tabs">';
       const countTasks = (arr) => arr.filter(t => t.type !== 'Epic').length;
-      html += '<div class="tab' + (activeTab === 'sprint' ? ' active' : '') + '" data-tab="sprint">Current: ' + esc(sprintName || 'None') + ' (' + countTasks(sprintTickets) + ')</div>';
-      const fs = futureSprints || [];
-      for (let i = 0; i < fs.length; i++) {
-        const tabId = 'future-' + i;
-        html += '<div class="tab' + (activeTab === tabId ? ' active' : '') + '" data-tab="' + tabId + '">Next: ' + esc(fs[i].name) + ' (' + countTasks(fs[i].tickets) + ')</div>';
+
+      if (DATA.sprintsEnabled) {
+        html += '<div class="tabs">';
+        html += '<div class="tab' + (activeTab === 'sprint' ? ' active' : '') + '" data-tab="sprint">Current: ' + esc(sprintName || 'None') + ' (' + countTasks(sprintTickets) + ')</div>';
+        const fs = futureSprints || [];
+        for (let i = 0; i < fs.length; i++) {
+          const tabId = 'future-' + i;
+          html += '<div class="tab' + (activeTab === tabId ? ' active' : '') + '" data-tab="' + tabId + '">Next: ' + esc(fs[i].name) + ' (' + countTasks(fs[i].tickets) + ')</div>';
+        }
+        html += '<div class="tab' + (activeTab === 'last-sprint' ? ' active' : '') + '" data-tab="last-sprint">Last: ' + esc(lastSprintName || 'None') + ' (' + countTasks(lastSprintTickets) + ')</div>';
+        html += '<div class="tab' + (activeTab === 'backlog' ? ' active' : '') + '" data-tab="backlog">Backlog (' + countTasks(backlogTickets) + ')</div>';
+        html += '<div class="tab' + (activeTab === 'all' ? ' active' : '') + '" data-tab="all">All Open (' + countTasks(tickets) + ')</div>';
+        html += '</div>';
+        // Sprint progress bar
+        let sprintProgressHtml = '';
+        if (sprintStart && sprintEnd) {
+          const start = new Date(sprintStart).getTime();
+          const end = new Date(sprintEnd).getTime();
+          const now = Date.now();
+          const total = end - start;
+          const elapsed = Math.max(0, Math.min(now - start, total));
+          const pct = Math.round((elapsed / total) * 100);
+          const daysLeft = Math.max(0, Math.ceil((end - now) / 86400000));
+          const barColor = pct > 85 ? '#da3633' : pct > 60 ? '#e3b341' : '#238636';
+          sprintProgressHtml = '<div class="sprint-info"><span>' + daysLeft + ' day' + (daysLeft !== 1 ? 's' : '') + ' remaining in sprint</span><span>' + pct + '% elapsed</span></div>'
+            + '<div class="sprint-bar"><div class="sprint-bar-fill" style="width:' + pct + '%;background:' + barColor + '"></div></div>';
+        }
+        html += '<div class="tab-content' + (activeTab === 'sprint' ? ' active' : '') + '" id="tab-sprint">' + sprintProgressHtml + renderTicketTable(sprintTickets) + '</div>';
+        for (let i = 0; i < fs.length; i++) {
+          const tabId = 'future-' + i;
+          html += '<div class="tab-content' + (activeTab === tabId ? ' active' : '') + '" id="tab-' + tabId + '">' + renderTicketTable(fs[i].tickets) + '</div>';
+        }
+        html += '<div class="tab-content' + (activeTab === 'last-sprint' ? ' active' : '') + '" id="tab-last-sprint">' + renderTicketTable(lastSprintTickets) + '</div>';
+        html += '<div class="tab-content' + (activeTab === 'backlog' ? ' active' : '') + '" id="tab-backlog">' + renderTicketTable(backlogTickets) + '</div>';
+        html += '<div class="tab-content' + (activeTab === 'all' ? ' active' : '') + '" id="tab-all">' + renderTicketTable(tickets) + '</div>';
+      } else {
+        // No sprints — show all tickets in a single flat view
+        html += renderTicketTable(tickets);
       }
-      html += '<div class="tab' + (activeTab === 'last-sprint' ? ' active' : '') + '" data-tab="last-sprint">Last: ' + esc(lastSprintName || 'None') + ' (' + countTasks(lastSprintTickets) + ')</div>';
-      html += '<div class="tab' + (activeTab === 'backlog' ? ' active' : '') + '" data-tab="backlog">Backlog (' + countTasks(backlogTickets) + ')</div>';
-      html += '<div class="tab' + (activeTab === 'all' ? ' active' : '') + '" data-tab="all">All Open (' + countTasks(tickets) + ')</div>';
-      html += '</div>';
-      // Sprint progress bar
-      let sprintProgressHtml = '';
-      if (sprintStart && sprintEnd) {
-        const start = new Date(sprintStart).getTime();
-        const end = new Date(sprintEnd).getTime();
-        const now = Date.now();
-        const total = end - start;
-        const elapsed = Math.max(0, Math.min(now - start, total));
-        const pct = Math.round((elapsed / total) * 100);
-        const daysLeft = Math.max(0, Math.ceil((end - now) / 86400000));
-        const barColor = pct > 85 ? '#da3633' : pct > 60 ? '#e3b341' : '#238636';
-        sprintProgressHtml = '<div class="sprint-info"><span>' + daysLeft + ' day' + (daysLeft !== 1 ? 's' : '') + ' remaining in sprint</span><span>' + pct + '% elapsed</span></div>'
-          + '<div class="sprint-bar"><div class="sprint-bar-fill" style="width:' + pct + '%;background:' + barColor + '"></div></div>';
-      }
-      html += '<div class="tab-content' + (activeTab === 'sprint' ? ' active' : '') + '" id="tab-sprint">' + sprintProgressHtml + renderTicketTable(sprintTickets) + '</div>';
-      for (let i = 0; i < fs.length; i++) {
-        const tabId = 'future-' + i;
-        html += '<div class="tab-content' + (activeTab === tabId ? ' active' : '') + '" id="tab-' + tabId + '">' + renderTicketTable(fs[i].tickets) + '</div>';
-      }
-      html += '<div class="tab-content' + (activeTab === 'last-sprint' ? ' active' : '') + '" id="tab-last-sprint">' + renderTicketTable(lastSprintTickets) + '</div>';
-      html += '<div class="tab-content' + (activeTab === 'backlog' ? ' active' : '') + '" id="tab-backlog">' + renderTicketTable(backlogTickets) + '</div>';
-      html += '<div class="tab-content' + (activeTab === 'all' ? ' active' : '') + '" id="tab-all">' + renderTicketTable(tickets) + '</div>';
 
       // Triaged
       const jiraItems = triagedItems.filter(i => i.triaged?.status === 'jira');
@@ -2528,6 +2609,31 @@ function getDashboardHTML() {
 </html>`;
 }
 
+// Track known action item hashes to detect new ones
+let knownActionItemHashes = null;
+
+function notifyNewActionItems(data) {
+  if (!IS_MACOS || process.env.TRIAGE_NOTIFICATIONS === "false") return;
+  if (!data.newItems || !data.newItems.length) {
+    knownActionItemHashes = new Set();
+    return;
+  }
+  const currentHashes = new Set(data.newItems.map(i => i.hash));
+  if (knownActionItemHashes === null) {
+    // First run — just record, don't notify
+    knownActionItemHashes = currentHashes;
+    return;
+  }
+  const brandNew = data.newItems.filter(i => !knownActionItemHashes.has(i.hash));
+  if (brandNew.length) {
+    const title = `${brandNew.length} new action item${brandNew.length > 1 ? 's' : ''}`;
+    const body = brandNew.map(i => i.text).join('\n').slice(0, 200);
+    const script = `display notification ${JSON.stringify(body)} with title ${JSON.stringify(title)} sound name "Glass"`;
+    execFile("osascript", ["-e", script], () => {});
+  }
+  knownActionItemHashes = currentHashes;
+}
+
 server.listen(PORT, () => {
   console.log(`Jirassic: http://localhost:${PORT}`);
 
@@ -2535,6 +2641,7 @@ server.listen(PORT, () => {
   setInterval(async () => {
     try {
       const data = await fetchAllData();
+      notifyNewActionItems(data);
       broadcast({ type: "refresh", data });
     } catch (e) {
       console.error("Auto-refresh error:", e.message);
