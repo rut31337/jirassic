@@ -2628,7 +2628,7 @@ function notifyNewActionItems(data) {
   if (brandNew.length) {
     const title = `${brandNew.length} new action item${brandNew.length > 1 ? 's' : ''}`;
     const body = brandNew.map(i => i.text).join('\n').slice(0, 200);
-    const script = `display notification ${JSON.stringify(body)} with title ${JSON.stringify(title)} sound name "Glass"`;
+    const script = `display alert ${JSON.stringify(title)} message ${JSON.stringify(body)}`;
     execFile("osascript", ["-e", script], () => {});
   }
   knownActionItemHashes = currentHashes;
