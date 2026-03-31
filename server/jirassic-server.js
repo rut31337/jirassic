@@ -2528,7 +2528,7 @@ function getDashboardHTML() {
           const epicSPDisplay = (epicSP ? epicSP : '') + (missingChildSPCount ? '<span class="sp-warn-epic" title="' + missingChildSPCount + ' task' + (missingChildSPCount > 1 ? 's' : '') + ' missing story points">' + missingChildSPCount + '</span>' : '');
           const epicStatusHidden = ['backlog', 'to do', 'new', ''].includes(info.status.toLowerCase());
           const epicStatusCell = epicStatusHidden
-            ? '<td class="editable-status" data-key="' + esc(info.key) + '" data-is-epic="true" style="cursor:pointer"></td>'
+            ? '<td class="editable-status" data-key="' + esc(info.key) + '" data-is-epic="true" style="cursor:pointer;min-width:3rem" title="Click to set status">—</td>'
             : '<td class="editable-status" data-key="' + esc(info.key) + '" data-is-epic="true" style="cursor:pointer"><span class="badge status-' + sc + '">' + esc(info.status) + '</span></td>';
           rows += '<tr class="epic-row" data-toggle-epic="' + eid + '"><td><span class="epic-arrow" id="arrow-' + eid + '">\\u25B6</span>' + jiraLink(info.key) + '<span class="badge epic">EPIC</span><button class="move-btn" data-move="' + esc(info.key) + '" title="Change sprint">Sprint</button></td><td class="editable-summary" data-key="' + esc(info.key) + '" data-summary="' + esc(info.summary) + '" style="cursor:pointer">' + esc(info.summary) + ' <span style="color:#484f58;font-size:0.8rem">(' + childCount + ')</span></td>' + epicStatusCell + '<td class="editable-priority" data-key="' + esc(info.key) + '" style="cursor:pointer">' + esc(info.priority) + '</td><td>' + epicSPDisplay + '</td>' + (showSprint ? '<td></td>' : '') + '</tr>';
         } else {
@@ -2542,8 +2542,11 @@ function getDashboardHTML() {
           const moveBtn2 = isClosed ? '' : '<button class="move-btn" data-move="' + esc(key) + '" title="Change sprint">Sprint</button>';
           const parentStatus = parentInfo?.status || '';
           const parentSc = parentStatus.toLowerCase().replace(/ /g, '-');
-          const statusCell = parentStatus ? '<span class="badge status-' + parentSc + '">' + esc(parentStatus) + '</span>' : '';
-          rows += '<tr class="epic-row" data-toggle-epic="' + eid + '"><td><span class="epic-arrow" id="arrow-' + eid + '">\\u25B6</span>' + jiraLink(key) + '<span class="badge epic">EPIC</span>' + moveBtn2 + '</td><td>' + parentLabel + ' <span style="color:#484f58;font-size:0.8rem">(' + childCount + ')</span></td><td>' + statusCell + '</td><td></td><td>' + epicSPDisplay2 + '</td>' + (showSprint ? '<td></td>' : '') + '</tr>';
+          const epicStatusHidden2 = ['backlog', 'to do', 'new', ''].includes(parentStatus.toLowerCase());
+          const statusCell2 = epicStatusHidden2
+            ? '<td class="editable-status" data-key="' + esc(key) + '" data-is-epic="true" style="cursor:pointer;min-width:3rem" title="Click to set status">—</td>'
+            : '<td class="editable-status" data-key="' + esc(key) + '" data-is-epic="true" style="cursor:pointer"><span class="badge status-' + parentSc + '">' + esc(parentStatus) + '</span></td>';
+          rows += '<tr class="epic-row" data-toggle-epic="' + eid + '"><td><span class="epic-arrow" id="arrow-' + eid + '">\\u25B6</span>' + jiraLink(key) + '<span class="badge epic">EPIC</span>' + moveBtn2 + '</td><td>' + parentLabel + ' <span style="color:#484f58;font-size:0.8rem">(' + childCount + ')</span></td>' + statusCell2 + '<td></td><td>' + epicSPDisplay2 + '</td>' + (showSprint ? '<td></td>' : '') + '</tr>';
         }
         for (const c of children) {
           const sc = c.status.toLowerCase().replace(/ /g, '-');
