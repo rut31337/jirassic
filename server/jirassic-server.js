@@ -131,6 +131,28 @@ function buildData(actionItems, tickets) {
     }
   }
 
+  // Include restored orphan items that aren't in the email data
+  const allHashes = new Set(allItems.map(i => i.hash));
+  if (state.restored) {
+    for (const [h, info] of Object.entries(state.restored)) {
+      if (allHashes.has(h)) {
+        // Item reappeared in email data, remove from restored
+        delete state.restored[h];
+      } else if (!state.triaged[h]) {
+        // Still an orphan and not re-triaged — show as new
+        allItems.push({
+          hash: h,
+          meeting: info.meeting || "",
+          date: "",
+          text: info.text || "",
+          triaged: null,
+        });
+      }
+    }
+    if (!Object.keys(state.restored).length) delete state.restored;
+    saveState(state);
+  }
+
   const newItems = allItems.filter((i) => !i.triaged);
   const triagedItems = allItems.filter((i) => i.triaged);
 
@@ -148,6 +170,7 @@ function buildData(actionItems, tickets) {
 
   const sprintTickets = tickets.filter((t) => t.sprint);
   const sprintName = sprintTickets[0]?.sprint || "";
+  const sprintId = sprintTickets[0]?.sprint_id || null;
   const sprintStart = sprintTickets[0]?.sprint_start || "";
   const sprintEnd = sprintTickets[0]?.sprint_end || "";
 
@@ -170,7 +193,7 @@ function buildData(actionItems, tickets) {
       futureSprintMap[t.future_sprint].push(t);
     }
   }
-  const futureSprints = Object.entries(futureSprintMap).map(([name, tix]) => ({ name, tickets: tix }));
+  const futureSprints = Object.entries(futureSprintMap).map(([name, tix]) => ({ name, id: tix[0]?.future_sprint_id || null, tickets: tix }));
 
   // Closed tickets only appear if they belong to current, last, or future sprint
   const closedStatuses = new Set(['Closed', 'Done']);
@@ -206,6 +229,7 @@ function buildData(actionItems, tickets) {
     missingParents: Array.from(missingParents),
     sprintTickets,
     sprintName,
+    sprintId,
     sprintStart,
     sprintEnd,
     lastSprintTickets,
@@ -285,6 +309,7 @@ const server = http.createServer(async (req, res) => {
         ...(ticketSummary ? { ticketSummary } : {}),
         triaged: new Date().toISOString(),
       };
+      if (state.restored) delete state.restored[hash];
       saveState(state);
       // Rebuild from last raw data cache without re-fetching
       const cached = loadCache();
@@ -306,7 +331,13 @@ const server = http.createServer(async (req, res) => {
     try {
       const { hash } = JSON.parse(await readBody(req));
       const state = loadState();
+      const wasTriaged = state.triaged[hash];
       delete state.triaged[hash];
+      // Preserve orphan items (not in current email data) so they reappear as new
+      if (wasTriaged && (wasTriaged.text || wasTriaged.meeting)) {
+        if (!state.restored) state.restored = {};
+        state.restored[hash] = { text: wasTriaged.text || '', meeting: wasTriaged.meeting || '' };
+      }
       saveState(state);
       // Rebuild from cache without re-fetching
       const cached = loadCache();
@@ -372,55 +403,77 @@ const server = http.createServer(async (req, res) => {
   // Jira API proxy — move ticket to a sprint
   if (req.method === "POST" && req.url === "/api/jira/next-sprint") {
     try {
-      const { key, sprintId } = JSON.parse(await readBody(req));
+      const { key, sprintId, isEpic } = JSON.parse(await readBody(req));
       const email = process.env.JIRA_EMAIL;
       const token = process.env.JIRA_API_TOKEN;
       const auth = Buffer.from(`${email}:${token}`).toString("base64");
       const boardId = process.env.TRIAGE_BOARD || "1274";
 
-      let targetSprint;
-      if (sprintId) {
-        // Use the sprint ID provided by the caller
-        targetSprint = { id: sprintId };
-      } else {
-        // Fall back to next future sprint
-        const sprintResp = await fetch(`https://${JIRA_SITE}/rest/agile/1.0/board/${boardId}/sprint?state=future&maxResults=1`, {
-          headers: { Authorization: `Basic ${auth}`, Accept: "application/json" },
-        });
-        const sprintData = await sprintResp.json();
-        targetSprint = sprintData.values?.[0];
-        if (!targetSprint) {
-          json({ error: "No future sprint found" }, 400);
-          return;
+      if (!sprintId) {
+        if (isEpic) {
+          // Epics: clear sprint field directly (don't move to backlog)
+          const clearResp = await fetch(`https://${JIRA_SITE}/rest/api/3/issue/${encodeURIComponent(key)}`, {
+            method: "PUT",
+            headers: {
+              Authorization: `Basic ${auth}`,
+              Accept: "application/json",
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ fields: { customfield_10020: null } }),
+          });
+          if (clearResp.status === 204 || clearResp.ok) {
+            json({ ok: true, sprint: null });
+          } else {
+            const data = await clearResp.json();
+            json({ error: JSON.stringify(data.errors || data.errorMessages || data) }, 400);
+          }
+        } else {
+          // Tasks: move to backlog
+          const moveResp = await fetch(`https://${JIRA_SITE}/rest/agile/1.0/backlog/issue`, {
+            method: "POST",
+            headers: {
+              Authorization: `Basic ${auth}`,
+              Accept: "application/json",
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ issues: [key] }),
+          });
+          if (moveResp.status === 204 || moveResp.ok) {
+            json({ ok: true, sprint: null });
+          } else {
+            const data = await moveResp.json();
+            json({ error: JSON.stringify(data.errors || data.errorMessages || data) }, 400);
+          }
         }
-      }
+      } else {
+        // Move to specific sprint
+        let targetSprint = { id: sprintId };
 
-      // Move issue to sprint
-      const moveResp = await fetch(`https://${JIRA_SITE}/rest/agile/1.0/sprint/${targetSprint.id}/issue`, {
-        method: "POST",
-        headers: {
-          Authorization: `Basic ${auth}`,
-          Accept: "application/json",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ issues: [key] }),
-      });
-      if (moveResp.status === 204 || moveResp.ok) {
-        // If we used a provided sprintId, fetch the sprint name for the toast
-        let sprintName = targetSprint.name;
-        if (!sprintName && sprintId) {
-          try {
-            const infoResp = await fetch(`https://${JIRA_SITE}/rest/agile/1.0/sprint/${sprintId}`, {
-              headers: { Authorization: `Basic ${auth}`, Accept: "application/json" },
-            });
-            const info = await infoResp.json();
-            sprintName = info.name || `Sprint ${sprintId}`;
-          } catch { sprintName = `Sprint ${sprintId}`; }
+        const moveResp = await fetch(`https://${JIRA_SITE}/rest/agile/1.0/sprint/${targetSprint.id}/issue`, {
+          method: "POST",
+          headers: {
+            Authorization: `Basic ${auth}`,
+            Accept: "application/json",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ issues: [key] }),
+        });
+        if (moveResp.status === 204 || moveResp.ok) {
+          let sprintName = targetSprint.name;
+          if (!sprintName) {
+            try {
+              const infoResp = await fetch(`https://${JIRA_SITE}/rest/agile/1.0/sprint/${sprintId}`, {
+                headers: { Authorization: `Basic ${auth}`, Accept: "application/json" },
+              });
+              const info = await infoResp.json();
+              sprintName = info.name || `Sprint ${sprintId}`;
+            } catch { sprintName = `Sprint ${sprintId}`; }
+          }
+          json({ ok: true, sprint: sprintName });
+        } else {
+          const data = await moveResp.json();
+          json({ error: JSON.stringify(data.errors || data.errorMessages || data) }, 400);
         }
-        json({ ok: true, sprint: sprintName });
-      } else {
-        const data = await moveResp.json();
-        json({ error: JSON.stringify(data.errors || data.errorMessages || data) }, 400);
       }
     } catch (e) {
       json({ error: e.message }, 500);
@@ -679,7 +732,7 @@ const server = http.createServer(async (req, res) => {
   // Jira API proxy — create a ticket
   if (req.method === "POST" && req.url === "/api/jira/create") {
     try {
-      const { summary, epicKey, description, assignToMe, storyPoints, priority } = JSON.parse(await readBody(req));
+      const { summary, epicKey, description, assignToMe, storyPoints, priority, sprintId } = JSON.parse(await readBody(req));
       const project = process.env.TRIAGE_PROJECT || "GPTEINFRA";
       const email = process.env.JIRA_EMAIL;
       const token = process.env.JIRA_API_TOKEN;
@@ -716,6 +769,20 @@ const server = http.createServer(async (req, res) => {
       });
       const data = await resp.json();
       if (data.key) {
+        // Move to sprint if specified
+        if (sprintId) {
+          try {
+            await fetch(`https://${JIRA_SITE}/rest/agile/1.0/sprint/${sprintId}/issue`, {
+              method: "POST",
+              headers: {
+                Authorization: `Basic ${auth}`,
+                Accept: "application/json",
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({ issues: [data.key] }),
+            });
+          } catch {}
+        }
         json({ ok: true, key: data.key, url: `https://${JIRA_SITE}/browse/${data.key}` });
       } else {
         json({ error: JSON.stringify(data.errors || data.errorMessages || data) }, 400);
@@ -1236,11 +1303,11 @@ function getDashboardHTML() {
     .modal-context { color: var(--text-muted); font-size: 0.85rem; margin-bottom: 1rem; padding: 0.5rem; background: var(--bg); border-radius: 4px; }
     .modal-section { margin-bottom: 1.5rem; }
     .modal-section h4 { color: #c9d1d9; margin-bottom: 0.5rem; font-size: 0.9rem; }
-    .epic-list { list-style: none; max-height: 200px; overflow-y: auto; }
-    .epic-item { padding: 0.5rem; border: 1px solid var(--border); border-radius: 4px; margin-bottom: 0.3rem; cursor: pointer; display: flex; gap: 0.5rem; align-items: center; }
+    .epic-list { list-style: none; max-height: 200px; overflow-y: auto; overflow-x: hidden; }
+    .epic-item { padding: 0.5rem; border: 1px solid var(--border); border-radius: 4px; margin-bottom: 0.3rem; cursor: pointer; display: flex; gap: 0.5rem; align-items: center; overflow: hidden; }
     .epic-item:hover { background: var(--bg3); border-color: var(--link); }
-    .epic-item .epic-key { color: var(--link); font-size: 0.85rem; }
-    .epic-item .epic-summary { color: var(--text); font-size: 0.85rem; }
+    .epic-item .epic-key { color: var(--link); font-size: 0.85rem; flex-shrink: 0; }
+    .epic-item .epic-summary { color: var(--text); font-size: 0.85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .modal-input { width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 6px 8px; border-radius: 4px; font-size: 0.9rem; margin-bottom: 0.5rem; }
     .modal-input:focus { border-color: var(--link); outline: none; }
     .modal-input::placeholder { color: var(--text-muted); }
@@ -1280,6 +1347,16 @@ function getDashboardHTML() {
     const JIRA_SITE = ${JSON.stringify(JIRA_SITE)};
     let DATA = null;
     let activeTab = 'sprint';
+    function getActiveTabSprint() {
+      if (!DATA) return { id: null, name: null };
+      if (activeTab === 'sprint') return { id: DATA.sprintId || null, name: DATA.sprintName || null };
+      if (activeTab.startsWith('future-')) {
+        const idx = parseInt(activeTab.split('-')[1], 10);
+        const fs = DATA.futureSprints || [];
+        return { id: fs[idx]?.id || null, name: fs[idx]?.name || null };
+      }
+      return { id: null, name: null };
+    }
     let ticketSearchTerm = '';
     let ticketStatusFilters = new Set();
     let ticketPriorityFilters = new Set();
@@ -1305,13 +1382,19 @@ function getDashboardHTML() {
     // Filter ticket table rows by search term, status, and priority
     function filterTicketRows() {
       const hasFilters = ticketSearchTerm || ticketStatusFilters.size || ticketPriorityFilters.size;
+      const hasStatusOrPriority = ticketStatusFilters.size || ticketPriorityFilters.size;
       document.querySelectorAll('.tab-content').forEach(tab => {
         tab.querySelectorAll('table tr').forEach(row => {
           if (row.querySelector('th')) return; // skip header
           if (row.classList.contains('epic-row')) {
             const eid = row.dataset.toggleEpic;
             const children = eid ? tab.querySelectorAll('.' + eid) : [];
-            if (!hasFilters) { row.style.display = ''; children.forEach(c => { if (c.style.display === 'none' && !expandedState['epic-' + eid]) return; }); return; }
+            const isExpanded = expandedState['epic-' + eid] || false;
+            if (!hasFilters) {
+              row.style.display = '';
+              children.forEach(c => { c.style.display = isExpanded ? '' : 'none'; });
+              return;
+            }
             const epicMatches = rowMatchesFilters(row);
             let anyChildMatch = false;
             children.forEach(c => {
@@ -1320,10 +1403,15 @@ function getDashboardHTML() {
             });
             row.style.display = (epicMatches || anyChildMatch) ? '' : 'none';
             children.forEach(c => {
-              if (c.querySelector('.add-btn')) { c.style.display = (epicMatches || anyChildMatch) ? '' : 'none'; return; }
-              c.style.display = (rowMatchesFilters(c) || epicMatches) ? '' : 'none';
+              if (c.querySelector('.add-btn')) {
+                c.style.display = isExpanded && (epicMatches || anyChildMatch) ? '' : 'none';
+                return;
+              }
+              const childMatch = hasStatusOrPriority ? rowMatchesFilters(c) : (rowMatchesFilters(c) || epicMatches);
+              c.style.display = isExpanded && childMatch ? '' : 'none';
             });
           } else if (!row.classList.contains('epic-child')) {
+            if (row.querySelector('.add-btn')) return; // always show add-epic button
             if (!hasFilters) { row.style.display = ''; return; }
             row.style.display = rowMatchesFilters(row) ? '' : 'none';
           }
@@ -1456,6 +1544,7 @@ function getDashboardHTML() {
 
         addDetail('Assignee', assignChecked ? 'You' : 'Unassigned');
         if (pri) addDetail('Priority', pri);
+        if (opts.sprint) addDetail('Sprint', opts.sprint);
         if (sp !== 'n/a') {
           const spP = document.createElement('p');
           spP.style.cssText = 'font-size:0.85rem;margin-top:0.2rem;';
@@ -1578,14 +1667,16 @@ function getDashboardHTML() {
       }
     }
 
-    async function editStatus(key, currentStatus, el) {
+    async function editStatus(key, currentStatus, el, isEpic) {
       const resp = await fetch('/api/jira/transitions/' + key);
       const transitions = await resp.json();
       if (!transitions.length) { showToast('No transitions available'); return; }
-      showDropdown(el, transitions.map(t => ({
-        label: t.name,
+      const defaultStatuses = ['backlog', 'to do', 'new'];
+      const items = transitions.map(t => ({
+        label: isEpic && defaultStatuses.includes(t.name.toLowerCase()) ? t.name + ' (clear)' : t.name,
         onClick: () => updateAndRefresh('/api/jira/transition', { key, transitionId: t.id }, key + ' → ' + t.name),
-      })));
+      }));
+      showDropdown(el, items);
     }
 
     async function editPriority(key, el) {
@@ -1639,6 +1730,98 @@ function getDashboardHTML() {
       })));
     }
 
+    // Set parent epic for a standalone ticket
+    async function setEpic(key) {
+      const ticket = DATA?.tickets?.find(t => t.key === key);
+      const summary = ticket ? key + ': ' + ticket.summary : key;
+      const epics = (DATA?.tickets || []).filter(t => t.type === 'Epic');
+      if (!epics.length) { showToast('No epics found'); return; }
+
+      const selectedEpic = await new Promise((resolve) => {
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.style.zIndex = '400';
+        const modal = document.createElement('div');
+        modal.className = 'modal';
+        modal.style.width = '450px'; modal.style.background = 'var(--bg2)';
+
+        const h = document.createElement('h3');
+        h.textContent = 'Add to epic';
+        modal.appendChild(h);
+
+        const details = document.createElement('p');
+        details.style.cssText = 'margin-bottom:0.75rem;font-size:0.9rem;';
+        const label = document.createElement('span');
+        label.style.color = 'var(--text-muted)';
+        label.textContent = 'Ticket: ';
+        const val = document.createElement('span');
+        val.style.color = 'var(--text-bright)';
+        val.textContent = summary;
+        details.appendChild(label);
+        details.appendChild(val);
+        modal.appendChild(details);
+
+        const search = document.createElement('input');
+        search.type = 'text';
+        search.placeholder = 'Search epics...';
+        search.style.cssText = 'width:100%;padding:0.4rem 0.6rem;margin-bottom:0.5rem;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:0.85rem;box-sizing:border-box;';
+        modal.appendChild(search);
+
+        const list = document.createElement('div');
+        list.className = 'epic-list';
+        for (const ep of epics) {
+          const item = document.createElement('div');
+          item.className = 'epic-item';
+          const keySpan = document.createElement('span');
+          keySpan.className = 'epic-key';
+          keySpan.textContent = ep.key;
+          const summarySpan = document.createElement('span');
+          summarySpan.className = 'epic-summary';
+          summarySpan.textContent = ep.summary;
+          item.appendChild(keySpan);
+          item.appendChild(summarySpan);
+          item.addEventListener('click', () => { overlay.remove(); resolve(ep); });
+          list.appendChild(item);
+        }
+        modal.appendChild(list);
+
+        search.addEventListener('input', () => {
+          const q = search.value.toLowerCase();
+          for (const child of list.children) {
+            child.style.display = child.textContent.toLowerCase().includes(q) ? '' : 'none';
+          }
+        });
+
+        const actions = document.createElement('div');
+        actions.className = 'modal-actions';
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 'modal-btn cancel';
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.addEventListener('click', () => { overlay.remove(); resolve(null); });
+        actions.appendChild(cancelBtn);
+        modal.appendChild(actions);
+
+        overlay.appendChild(modal);
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) { overlay.remove(); resolve(null); } });
+        document.body.appendChild(overlay);
+        search.focus();
+      });
+
+      if (!selectedEpic) return;
+      const resp = await fetch('/api/jira/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, fields: { parent: { key: selectedEpic.key } } }),
+      });
+      const data = await resp.json();
+      if (data.ok) {
+        showToast(key + ' added to ' + selectedEpic.key);
+        setTimeout(() => fetch('/api/refresh', { method: 'POST' }), 1500);
+      } else {
+        showToast('Error: ' + (data.error || 'unknown'));
+      }
+    }
+
         // Move to sprint (with future sprint picker)
     async function moveToNextSprint(key) {
       const ticket = DATA?.tickets?.find(t => t.key === key);
@@ -1651,7 +1834,7 @@ function getDashboardHTML() {
         const d = await r.json();
         sprints = d.sprints || [];
       } catch {}
-      if (!sprints.length) { showToast('No future sprints found'); return; }
+      // sprints may be empty — still show modal for "No sprint" option
 
       // Build modal with sprint dropdown
       const selectedSprint = await new Promise((resolve) => {
@@ -1687,12 +1870,21 @@ function getDashboardHTML() {
 
         const select = document.createElement('select');
         select.style.cssText = 'width:100%;padding:0.4rem 0.5rem;background:var(--bg1);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.9rem;';
-        const firstFutureIdx = sprints.findIndex(s => s.state === 'future');
-        sprints.forEach((s, i) => {
+        const ticketSprintId = ticket?.sprint_id || ticket?.future_sprint_id || null;
+        const clearOpt = document.createElement('option');
+        clearOpt.value = '';
+        clearOpt.textContent = '— No sprint —';
+        clearOpt.selected = !ticketSprintId;
+        select.appendChild(clearOpt);
+        let firstFuture = true;
+        sprints.forEach((s) => {
           const opt = document.createElement('option');
           opt.value = s.id;
-          opt.textContent = s.name + (s.state === 'active' ? ' (current)' : '');
-          opt.selected = firstFutureIdx >= 0 ? i === firstFutureIdx : i === 0;
+          let suffix = '';
+          if (s.state === 'active') suffix = ' (current)';
+          else if (s.state === 'future' && firstFuture) { suffix = ' (next)'; firstFuture = false; }
+          opt.textContent = s.name + suffix;
+          opt.selected = ticketSprintId && String(s.id) === String(ticketSprintId);
           select.appendChild(opt);
         });
         details.appendChild(select);
@@ -1723,11 +1915,11 @@ function getDashboardHTML() {
       const resp = await fetch('/api/jira/next-sprint', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key, sprintId: selectedSprint.id }),
+        body: JSON.stringify({ key, sprintId: selectedSprint.id || null, isEpic: ticket?.type === 'Epic' }),
       });
       const data = await resp.json();
       if (data.ok) {
-        showToast(key + ' moved to ' + (data.sprint || selectedSprint.name));
+        showToast(data.sprint ? key + ' moved to ' + data.sprint : key + ' moved to backlog');
         // If this was the last ticket in the current tab, switch back to current sprint
         if (activeTab !== 'sprint' && activeTab !== 'all') {
           const tabEl = document.getElementById('tab-' + activeTab);
@@ -1745,7 +1937,7 @@ function getDashboardHTML() {
     }
 
     // Quick create ticket/epic
-    async function quickCreate(epicKey, isEpic) {
+    async function quickCreate(epicKey, isEpic, passedEpicSummary) {
       const overlay = document.createElement('div');
       overlay.className = 'modal-overlay';
       overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
@@ -1755,13 +1947,13 @@ function getDashboardHTML() {
       modal.style.width = '450px';
 
       const title = document.createElement('h3');
-      let epicSummary = '';
-      if (epicKey && DATA) {
+      let epicSummary = passedEpicSummary || '';
+      if (!epicSummary && epicKey && DATA) {
         const epic = DATA.tickets.find(t => t.key === epicKey);
         if (epic) epicSummary = epic.summary;
         if (!epicSummary && parentCache[epicKey]) epicSummary = parentCache[epicKey].summary;
       }
-      title.textContent = isEpic ? 'Create Epic' : (epicKey ? 'Add Task to ' + epicKey + (epicSummary ? ': ' + epicSummary : '') : 'Create Standalone Task');
+      title.textContent = isEpic ? 'Create Epic' : (epicKey ? 'Add Task to ' + epicKey + (epicSummary ? ': ' + epicSummary : '') : 'Create Task');
       modal.appendChild(title);
 
       const summaryInput = document.createElement('input');
@@ -1820,6 +2012,67 @@ function getDashboardHTML() {
       }
       modal.appendChild(optionsDiv);
 
+      // Epic selector for standalone task creation
+      let epicSelect = { value: '' };
+      if (!epicKey && !isEpic) {
+        const epics = (DATA?.tickets || []).filter(t => t.type === 'Epic');
+        if (epics.length) {
+          const epicDiv = document.createElement('div');
+          epicDiv.style.cssText = 'margin:0.5rem 0;';
+          const epicLabelEl = document.createElement('div');
+          epicLabelEl.style.cssText = 'color:var(--text-muted);font-size:0.85rem;margin-bottom:0.3rem;';
+          epicLabelEl.textContent = 'Epic';
+          epicDiv.appendChild(epicLabelEl);
+          const epicSearch = document.createElement('input');
+          epicSearch.type = 'text';
+          epicSearch.placeholder = 'Search epics... (leave empty for standalone)';
+          epicSearch.style.cssText = 'width:100%;padding:0.4rem 0.6rem;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:0.85rem;box-sizing:border-box;';
+          epicDiv.appendChild(epicSearch);
+          const epicList = document.createElement('div');
+          epicList.className = 'epic-list';
+          epicList.style.marginTop = '0.3rem';
+          const selectedDisplay = document.createElement('div');
+          selectedDisplay.style.cssText = 'display:none;margin-top:0.3rem;padding:0.4rem 0.6rem;background:var(--bg3);border:1px solid var(--border);border-radius:4px;font-size:0.85rem;color:var(--text);cursor:pointer;';
+          selectedDisplay.title = 'Click to change';
+          selectedDisplay.addEventListener('click', () => {
+            epicSelect.value = '';
+            selectedDisplay.style.display = 'none';
+            epicSearch.style.display = '';
+            epicList.style.display = '';
+            epicSearch.focus();
+          });
+          epicDiv.appendChild(selectedDisplay);
+          for (const ep of epics) {
+            const item = document.createElement('div');
+            item.className = 'epic-item';
+            const keySpan = document.createElement('span');
+            keySpan.className = 'epic-key';
+            keySpan.textContent = ep.key;
+            const summarySpan = document.createElement('span');
+            summarySpan.className = 'epic-summary';
+            summarySpan.textContent = ep.summary;
+            item.appendChild(keySpan);
+            item.appendChild(summarySpan);
+            item.addEventListener('click', () => {
+              epicSelect.value = ep.key;
+              selectedDisplay.textContent = ep.key + ': ' + ep.summary;
+              selectedDisplay.style.display = '';
+              epicSearch.style.display = 'none';
+              epicList.style.display = 'none';
+            });
+            epicList.appendChild(item);
+          }
+          epicDiv.appendChild(epicList);
+          epicSearch.addEventListener('input', () => {
+            const q = epicSearch.value.toLowerCase();
+            for (const child of epicList.children) {
+              child.style.display = child.textContent.toLowerCase().includes(q) ? '' : 'none';
+            }
+          });
+          modal.appendChild(epicDiv);
+        }
+      }
+
       const actions = document.createElement('div');
       actions.className = 'modal-actions';
 
@@ -1834,15 +2087,23 @@ function getDashboardHTML() {
       createBtn.addEventListener('click', async () => {
         const summary = summaryInput.value.trim();
         if (!summary) { summaryInput.style.borderColor = '#da3633'; summaryInput.focus(); return; }
+        const selectedEpicKey = epicSelect?.value || epicKey;
         const sp = modal.spSelect?.value || null;
         const assign = assignCheck.checked;
 
         const priority = modal.prSelect?.value || 'Major';
         const typeName = isEpic ? 'Epic' : 'Task';
-        if (!await confirmCreate('Create ' + typeName + '?', summary, epicKey ? epicKey + (epicSummary ? ': ' + epicSummary : '') : null, { assign, storyPoints: isEpic ? 'n/a' : (sp || ''), priority })) return;
+        const tabSprint = getActiveTabSprint();
+        let selectedEpicLabel = null;
+        if (selectedEpicKey) {
+          const selEpic = (DATA?.tickets || []).find(t => t.key === selectedEpicKey);
+          selectedEpicLabel = selectedEpicKey + (selEpic ? ': ' + selEpic.summary : (epicSummary ? ': ' + epicSummary : ''));
+        }
+        if (!await confirmCreate('Create ' + typeName + '?', summary, selectedEpicLabel, { assign, storyPoints: isEpic ? 'n/a' : (sp || ''), priority, sprint: (!isEpic && tabSprint.name) ? tabSprint.name : '' })) return;
         const body = { summary, assignToMe: assign, priority };
-        if (epicKey && !isEpic) body.epicKey = epicKey;
+        if (selectedEpicKey && !isEpic) body.epicKey = selectedEpicKey;
         if (sp) body.storyPoints = sp;
+        if (tabSprint.id && !isEpic) body.sprintId = tabSprint.id;
 
         // For epics, we need a different issue type
         const url = isEpic ? '/api/jira/create-epic' : '/api/jira/create';
@@ -2062,6 +2323,33 @@ function getDashboardHTML() {
       spLabel.appendChild(spWarn2);
       optionsDiv.appendChild(spLabel);
 
+      const sprintLabel2 = document.createElement('label');
+      sprintLabel2.style.cssText = 'display:flex;align-items:center;gap:0.4rem;color:#c9d1d9;font-size:0.85rem;';
+      sprintLabel2.appendChild(document.createTextNode('Sprint'));
+      const sprintSelect2 = document.createElement('select');
+      sprintSelect2.id = 'create-sprint';
+      sprintSelect2.style.cssText = 'background:var(--bg);border:1px solid var(--border);color:var(--text);padding:2px 6px;border-radius:4px;font-size:0.85rem;';
+      const noSprintOpt = document.createElement('option');
+      noSprintOpt.value = '';
+      noSprintOpt.textContent = '— None —';
+      sprintSelect2.appendChild(noSprintOpt);
+      sprintLabel2.appendChild(sprintSelect2);
+      optionsDiv.appendChild(sprintLabel2);
+      // Populate sprints async
+      fetch('/api/jira/future-sprints').then(r => r.json()).then(d => {
+        const sprints = d.sprints || [];
+        let firstFuture2 = true;
+        for (const s of sprints) {
+          const opt = document.createElement('option');
+          opt.value = s.id;
+          let suffix = '';
+          if (s.state === 'active') suffix = ' (current)';
+          else if (s.state === 'future' && firstFuture2) { suffix = ' (next)'; firstFuture2 = false; }
+          opt.textContent = s.name + suffix;
+          sprintSelect2.appendChild(opt);
+        }
+      }).catch(() => {});
+
       modal.appendChild(optionsDiv);
 
       // Section 1: Add to an epic
@@ -2076,6 +2364,18 @@ function getDashboardHTML() {
         const epicTitle = document.createElement('h4');
         epicTitle.textContent = 'Your Epics';
         epicSection.appendChild(epicTitle);
+        const epicSearch = document.createElement('input');
+        epicSearch.type = 'text';
+        epicSearch.placeholder = 'Search epics...';
+        epicSearch.style.cssText = 'width:100%;padding:0.4rem 0.6rem;margin-bottom:0.5rem;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:0.85rem;box-sizing:border-box;';
+        epicSearch.addEventListener('input', () => {
+          const q = epicSearch.value.toLowerCase();
+          for (const child of epicListEl.children) {
+            const txt = child.textContent.toLowerCase();
+            child.style.display = txt.includes(q) ? '' : 'none';
+          }
+        });
+        epicSection.appendChild(epicSearch);
         const epicListEl = document.createElement('div');
         epicListEl.className = 'epic-list';
 
@@ -2094,11 +2394,15 @@ function getDashboardHTML() {
             const summary = text.length > 100 ? text.substring(0, 100) + '...' : text;
             const assignToMe = document.getElementById('assign-me')?.checked ?? true;
             const storyPoints = document.getElementById('story-points')?.value || null;
-            if (!await confirmCreate('Create task under ' + ep.key + '?', summary, ep.key + ': ' + ep.summary, { assign: assignToMe, storyPoints: storyPoints || '', priority: '' })) return;
+            const sprintId2 = document.getElementById('create-sprint')?.value || null;
+            const sprintName2 = sprintId2 ? document.getElementById('create-sprint')?.options[document.getElementById('create-sprint')?.selectedIndex]?.text : '';
+            if (!await confirmCreate('Create task under ' + ep.key + '?', summary, ep.key + ': ' + ep.summary, { assign: assignToMe, storyPoints: storyPoints || '', priority: '', sprint: sprintName2 })) return;
+            const createBody = { summary, epicKey: ep.key, description: text, assignToMe, storyPoints };
+            if (sprintId2) createBody.sprintId = sprintId2;
             const resp = await fetch('/api/jira/create', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ summary, epicKey: ep.key, description: text, assignToMe, storyPoints }),
+              body: JSON.stringify(createBody),
             });
             const result = await resp.json();
             if (result.ok) {
@@ -2131,11 +2435,15 @@ function getDashboardHTML() {
         if (!summary) { contextDiv.style.borderColor = '#da3633'; contextDiv.focus(); return; }
         const assignToMe = document.getElementById('assign-me')?.checked ?? true;
         const storyPoints = document.getElementById('story-points')?.value || null;
-        if (!await confirmCreate('Create standalone ticket?', summary, null, { assign: assignToMe, storyPoints: storyPoints || '' })) return;
+        const sprintId3 = document.getElementById('create-sprint')?.value || null;
+        const sprintName3 = sprintId3 ? document.getElementById('create-sprint')?.options[document.getElementById('create-sprint')?.selectedIndex]?.text : '';
+        if (!await confirmCreate('Create standalone ticket?', summary, null, { assign: assignToMe, storyPoints: storyPoints || '', sprint: sprintName3 })) return;
+        const createBody2 = { summary, description: text, assignToMe, storyPoints };
+        if (sprintId3) createBody2.sprintId = sprintId3;
         const resp = await fetch('/api/jira/create', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ summary, description: text, assignToMe, storyPoints }),
+          body: JSON.stringify(createBody2),
         });
         const result = await resp.json();
         if (result.ok) {
@@ -2194,7 +2502,10 @@ function getDashboardHTML() {
 
     // --- Render ticket table ---
     let tableCounter = 0;
-    function renderTicketTable(tickets) {
+    function renderTicketTable(tickets, options) {
+      const showSprint = options?.showSprint || false;
+      const sprintLabel = (t) => t.sprint || t.future_sprint || t.last_sprint || 'Backlog';
+      const colSpan = showSprint ? 6 : 5;
       if (!tickets || !tickets.length) return '<p class="empty">No tickets</p>';
       const tbl = tableCounter++;
       const epicInfo = {}, epicChildren = {}, standalone = [];
@@ -2206,56 +2517,61 @@ function getDashboardHTML() {
       let rows = '';
       let epicIdx = 0;
       for (const [key, children] of Object.entries(epicChildren)) {
-        const eid = 'epic-t' + tbl + '-' + (epicIdx++) + '-' + key.replace(/[^a-zA-Z0-9]/g, '');
         const info = epicInfo[key];
         const childCount = children.length;
+        if (info && childCount === 0) continue; // skip epics with no children in this view
+        const eid = 'epic-t' + tbl + '-' + (epicIdx++) + '-' + key.replace(/[^a-zA-Z0-9]/g, '');
         if (info) {
           const sc = info.status.toLowerCase().replace(/ /g, '-');
           const epicSP = children.reduce((sum, c) => sum + (c.story_points || 0), 0);
           const missingChildSPCount = children.filter(c => !c.story_points).length;
           const epicSPDisplay = (epicSP ? epicSP : '') + (missingChildSPCount ? '<span class="sp-warn-epic" title="' + missingChildSPCount + ' task' + (missingChildSPCount > 1 ? 's' : '') + ' missing story points">' + missingChildSPCount + '</span>' : '');
-          rows += '<tr class="epic-row" data-toggle-epic="' + eid + '"><td><span class="epic-arrow" id="arrow-' + eid + '">\\u25B6</span>' + jiraLink(info.key) + '<span class="badge epic">EPIC</span><button class="move-btn" data-move="' + esc(info.key) + '" title="Move to next sprint">→</button></td><td class="editable-summary" data-key="' + esc(info.key) + '" data-summary="' + esc(info.summary) + '" style="cursor:pointer">' + esc(info.summary) + ' <span style="color:#484f58;font-size:0.8rem">(' + childCount + ')</span></td><td class="editable-status" data-key="' + esc(info.key) + '" style="cursor:pointer"><span class="badge status-' + sc + '">' + esc(info.status) + '</span></td><td class="editable-priority" data-key="' + esc(info.key) + '" style="cursor:pointer">' + esc(info.priority) + '</td><td>' + epicSPDisplay + '</td></tr>';
+          const epicStatusHidden = ['backlog', 'to do', 'new', ''].includes(info.status.toLowerCase());
+          const epicStatusCell = epicStatusHidden
+            ? '<td class="editable-status" data-key="' + esc(info.key) + '" data-is-epic="true" style="cursor:pointer"></td>'
+            : '<td class="editable-status" data-key="' + esc(info.key) + '" data-is-epic="true" style="cursor:pointer"><span class="badge status-' + sc + '">' + esc(info.status) + '</span></td>';
+          rows += '<tr class="epic-row" data-toggle-epic="' + eid + '"><td><span class="epic-arrow" id="arrow-' + eid + '">\\u25B6</span>' + jiraLink(info.key) + '<span class="badge epic">EPIC</span><button class="move-btn" data-move="' + esc(info.key) + '" title="Change sprint">Sprint</button></td><td class="editable-summary" data-key="' + esc(info.key) + '" data-summary="' + esc(info.summary) + '" style="cursor:pointer">' + esc(info.summary) + ' <span style="color:#484f58;font-size:0.8rem">(' + childCount + ')</span></td>' + epicStatusCell + '<td class="editable-priority" data-key="' + esc(info.key) + '" style="cursor:pointer">' + esc(info.priority) + '</td><td>' + epicSPDisplay + '</td>' + (showSprint ? '<td></td>' : '') + '</tr>';
         } else {
-          const cached = parentCache[key];
-          const parentInfo = parentCache[key];
+          const allTicketInfo = (DATA?.tickets || []).find(t => t.key === key);
+          const parentInfo = parentCache[key] || (allTicketInfo ? { summary: allTicketInfo.summary, status: allTicketInfo.status } : null);
           const parentLabel = parentInfo ? esc(parentInfo.summary) : esc(key);
           const epicSP2 = children.reduce((sum, c) => sum + (c.story_points || 0), 0);
           const missingChildSPCount2 = children.filter(c => !c.story_points).length;
           const epicSPDisplay2 = (epicSP2 ? epicSP2 : '') + (missingChildSPCount2 ? '<span class="sp-warn-epic" title="' + missingChildSPCount2 + ' task' + (missingChildSPCount2 > 1 ? 's' : '') + ' missing story points">' + missingChildSPCount2 + '</span>' : '');
-          const parentData = parentCache[key];
-          const isClosed = parentData?.status === 'Closed' || parentData?.status === 'Done';
-          const moveBtn2 = isClosed ? '' : '<button class="move-btn" data-move="' + esc(key) + '" title="Move to next sprint">→</button>';
-          const parentStatus = parentData?.status || '';
+          const isClosed = parentInfo?.status === 'Closed' || parentInfo?.status === 'Done';
+          const moveBtn2 = isClosed ? '' : '<button class="move-btn" data-move="' + esc(key) + '" title="Change sprint">Sprint</button>';
+          const parentStatus = parentInfo?.status || '';
           const parentSc = parentStatus.toLowerCase().replace(/ /g, '-');
           const statusCell = parentStatus ? '<span class="badge status-' + parentSc + '">' + esc(parentStatus) + '</span>' : '';
-          rows += '<tr class="epic-row" data-toggle-epic="' + eid + '"><td><span class="epic-arrow" id="arrow-' + eid + '">\\u25B6</span>' + jiraLink(key) + '<span class="badge epic">EPIC</span>' + moveBtn2 + '</td><td>' + parentLabel + ' <span style="color:#484f58;font-size:0.8rem">(' + childCount + ')</span></td><td>' + statusCell + '</td><td></td><td>' + epicSPDisplay2 + '</td></tr>';
+          rows += '<tr class="epic-row" data-toggle-epic="' + eid + '"><td><span class="epic-arrow" id="arrow-' + eid + '">\\u25B6</span>' + jiraLink(key) + '<span class="badge epic">EPIC</span>' + moveBtn2 + '</td><td>' + parentLabel + ' <span style="color:#484f58;font-size:0.8rem">(' + childCount + ')</span></td><td>' + statusCell + '</td><td></td><td>' + epicSPDisplay2 + '</td>' + (showSprint ? '<td></td>' : '') + '</tr>';
         }
         for (const c of children) {
           const sc = c.status.toLowerCase().replace(/ /g, '-');
           const isClosed = c.status === 'Closed' || c.status === 'Done';
           const closedClass = isClosed ? ' ticket-closed' : '';
           const spDisplay = c.story_points ? c.story_points : '<span class="sp-warn" title="No story points set">⚠️</span>';
-          rows += '<tr class="epic-child ' + eid + closedClass + '" style="display:none"><td>' + jiraLink(c.key) + (isClosed ? '' : '<button class="move-btn" data-move="' + esc(c.key) + '" title="Move to next sprint">→</button>') + '</td><td class="editable-summary" data-key="' + esc(c.key) + '" data-summary="' + esc(c.summary) + '" style="cursor:pointer">' + esc(c.summary) + '</td><td class="editable-status" data-key="' + esc(c.key) + '" style="cursor:pointer"><span class="badge status-' + sc + '">' + esc(c.status) + '</span></td><td class="editable-priority" data-key="' + esc(c.key) + '" style="cursor:pointer">' + esc(c.priority) + '</td><td class="editable-sp" data-key="' + esc(c.key) + '" style="cursor:pointer">' + spDisplay + '</td></tr>';
+          rows += '<tr class="epic-child ' + eid + closedClass + '" style="display:none"><td>' + jiraLink(c.key) + (isClosed ? '' : '<button class="move-btn" data-move="' + esc(c.key) + '" title="Change sprint">Sprint</button>') + '</td><td class="editable-summary" data-key="' + esc(c.key) + '" data-summary="' + esc(c.summary) + '" style="cursor:pointer">' + esc(c.summary) + '</td><td class="editable-status" data-key="' + esc(c.key) + '" style="cursor:pointer"><span class="badge status-' + sc + '">' + esc(c.status) + '</span></td><td class="editable-priority" data-key="' + esc(c.key) + '" style="cursor:pointer">' + esc(c.priority) + '</td><td class="editable-sp" data-key="' + esc(c.key) + '" style="cursor:pointer">' + spDisplay + '</td>' + (showSprint ? '<td style="font-size:0.8rem;color:var(--text-muted)">' + esc(sprintLabel(c)) + '</td>' : '') + '</tr>';
         }
         const epicKeyForAdd = info ? info.key : key;
-        rows += '<tr class="epic-child ' + eid + '" style="display:none"><td colspan="5" style="padding-left:2.5rem"><button class="add-btn" data-add-task="' + esc(epicKeyForAdd) + '">+ Add Task</button></td></tr>';
+        const epicSummaryForAdd = info ? info.summary : (parentCache[key]?.summary || (DATA?.tickets || []).find(t => t.key === key)?.summary || '');
+        rows += '<tr class="epic-child ' + eid + '" style="display:none"><td colspan="' + colSpan + '" style="padding-left:2.5rem"><button class="add-btn" data-add-task="' + esc(epicKeyForAdd) + '" data-epic-summary="' + esc(epicSummaryForAdd || '') + '">+ Add Task</button></td></tr>';
       }
       if (standalone.length) {
         const sid = 'epic-t' + tbl + '-standalone-' + epicIdx;
         const standaloneSP = standalone.reduce((sum, t) => sum + (t.story_points || 0), 0);
         const standaloneMissingSP = standalone.filter(t => !t.story_points).length;
         const standaloneSPDisplay = (standaloneSP ? standaloneSP : '') + (standaloneMissingSP ? '<span class="sp-warn-epic" title="' + standaloneMissingSP + ' task' + (standaloneMissingSP > 1 ? 's' : '') + ' missing story points">' + standaloneMissingSP + '</span>' : '');
-        rows += '<tr class="epic-row" data-toggle-epic="' + sid + '"><td><span class="epic-arrow" id="arrow-' + sid + '">\\u25B6</span>Standalone <span style="color:#484f58;font-size:0.8rem">(' + standalone.length + ')</span></td><td></td><td></td><td></td><td>' + standaloneSPDisplay + '</td></tr>';
+        rows += '<tr class="epic-row" data-toggle-epic="' + sid + '"><td><span class="epic-arrow" id="arrow-' + sid + '">\\u25B6</span>Standalone <span style="color:#484f58;font-size:0.8rem">(' + standalone.length + ')</span></td><td></td><td></td><td></td><td>' + standaloneSPDisplay + '</td>' + (showSprint ? '<td></td>' : '') + '</tr>';
         for (const t of standalone) {
           const sc = t.status.toLowerCase().replace(/ /g, '-');
           const isClosed = t.status === 'Closed' || t.status === 'Done';
           const closedClass = isClosed ? ' ticket-closed' : '';
           const spDisplay = t.story_points ? t.story_points : '<span class="sp-warn" title="No story points set">⚠️</span>';
-          rows += '<tr class="epic-child ' + sid + closedClass + '" style="display:none"><td>' + jiraLink(t.key) + (isClosed ? '' : '<button class="move-btn" data-move="' + esc(t.key) + '" title="Move to next sprint">→</button>') + '</td><td class="editable-summary" data-key="' + esc(t.key) + '" data-summary="' + esc(t.summary) + '" style="cursor:pointer">' + esc(t.summary) + '</td><td class="editable-status" data-key="' + esc(t.key) + '" style="cursor:pointer"><span class="badge status-' + sc + '">' + esc(t.status) + '</span></td><td class="editable-priority" data-key="' + esc(t.key) + '" style="cursor:pointer">' + esc(t.priority) + '</td><td class="editable-sp" data-key="' + esc(t.key) + '" style="cursor:pointer">' + spDisplay + '</td></tr>';
+          rows += '<tr class="epic-child ' + sid + closedClass + '" style="display:none"><td>' + jiraLink(t.key) + (isClosed ? '' : '<button class="move-btn" data-move="' + esc(t.key) + '" title="Change sprint">Sprint</button><button class="move-btn" data-set-epic="' + esc(t.key) + '" title="Add to epic">Epic</button>') + '</td><td class="editable-summary" data-key="' + esc(t.key) + '" data-summary="' + esc(t.summary) + '" style="cursor:pointer">' + esc(t.summary) + '</td><td class="editable-status" data-key="' + esc(t.key) + '" style="cursor:pointer"><span class="badge status-' + sc + '">' + esc(t.status) + '</span></td><td class="editable-priority" data-key="' + esc(t.key) + '" style="cursor:pointer">' + esc(t.priority) + '</td><td class="editable-sp" data-key="' + esc(t.key) + '" style="cursor:pointer">' + spDisplay + '</td>' + (showSprint ? '<td style="font-size:0.8rem;color:var(--text-muted)">' + esc(sprintLabel(t)) + '</td>' : '') + '</tr>';
         }
-        rows += '<tr class="epic-child ' + sid + '" style="display:none"><td colspan="5" style="padding-left:2.5rem"><button class="add-btn" data-add-task="">+ Add Task</button></td></tr>';
+        rows += '<tr class="epic-child ' + sid + '" style="display:none"><td colspan="' + colSpan + '" style="padding-left:2.5rem"><button class="add-btn" data-add-task="">+ Add Task</button></td></tr>';
       }
-      rows += '<tr><td colspan="5"><button class="add-btn" data-add-epic="true">+ Add Epic</button></td></tr>';
+      rows += '<tr><td colspan="' + colSpan + '"><button class="add-btn" data-add-task="">+ Add Task</button> <button class="add-btn" data-add-epic="true">+ Add Epic</button></td></tr>';
       const nonEpicTickets = tickets.filter(t => t.type !== 'Epic');
       const totalSP = nonEpicTickets.reduce((sum, t) => sum + (t.story_points || 0), 0);
       const noSP = nonEpicTickets.every(t => !t.story_points);
@@ -2265,7 +2581,7 @@ function getDashboardHTML() {
       else if (totalSP > 21) spClass = 'sp-yellow';
       const spTooltip = noSP ? 'No story points set on any tickets' : (totalSP > 34 ? 'Overloaded (35+)' : totalSP > 21 ? 'Heavy sprint (22-34)' : 'Comfortable capacity (0-21)');
       const spFooter = '<div style="text-align:right;margin-top:0.3rem;"><span class="sp-total ' + spClass + '" title="' + spTooltip + '">Total Story Points: ' + totalSP + '</span></div>';
-      return '<table><tr><th>Ticket</th><th>Summary</th><th>Status</th><th>Priority</th><th>SP</th></tr>' + rows + '</table>' + spFooter;
+      return '<table><tr><th>Ticket</th><th>Summary</th><th>Status</th><th>Priority</th><th>SP</th>' + (showSprint ? '<th>Sprint</th>' : '') + '</tr>' + rows + '</table>' + spFooter;
     }
 
     // --- Collapse state ---
@@ -2401,7 +2717,7 @@ function getDashboardHTML() {
         }
         html += '<div class="tab-content' + (activeTab === 'last-sprint' ? ' active' : '') + '" id="tab-last-sprint">' + renderTicketTable(lastSprintTickets) + '</div>';
         html += '<div class="tab-content' + (activeTab === 'backlog' ? ' active' : '') + '" id="tab-backlog">' + renderTicketTable(backlogTickets) + '</div>';
-        html += '<div class="tab-content' + (activeTab === 'all' ? ' active' : '') + '" id="tab-all">' + renderTicketTable(tickets) + '</div>';
+        html += '<div class="tab-content' + (activeTab === 'all' ? ' active' : '') + '" id="tab-all">' + renderTicketTable(tickets, { showSprint: true }) + '</div>';
       } else {
         // No sprints — show all tickets in a single flat view
         html += renderTicketTable(tickets);
@@ -2457,11 +2773,10 @@ function getDashboardHTML() {
         if (arrow) {
           arrow.addEventListener('click', (e) => {
             e.stopPropagation();
-            const children = app.querySelectorAll('.' + eid);
-            const visible = children[0]?.style.display !== 'none';
-            children.forEach(c => c.style.display = visible ? 'none' : '');
-            expandedState['epic-' + eid] = !visible;
-            arrow.textContent = visible ? '\\u25B6' : '\\u25BC';
+            const isExpanded = expandedState['epic-' + eid] || false;
+            expandedState['epic-' + eid] = !isExpanded;
+            arrow.textContent = isExpanded ? '\\u25B6' : '\\u25BC';
+            filterTicketRows();
           });
         }
       });
@@ -2518,15 +2833,18 @@ function getDashboardHTML() {
 
       // Quick add buttons
       app.querySelectorAll('[data-add-task]').forEach(btn => {
-        btn.addEventListener('click', (e) => { e.stopPropagation(); quickCreate(btn.dataset.addTask || '', false); });
+        btn.addEventListener('click', (e) => { e.stopPropagation(); quickCreate(btn.dataset.addTask || '', false, btn.dataset.epicSummary || ''); });
       });
       app.querySelectorAll('[data-add-epic]').forEach(btn => {
         btn.addEventListener('click', (e) => { e.stopPropagation(); quickCreate('', true); });
       });
+      app.querySelectorAll('[data-set-epic]').forEach(btn => {
+        btn.addEventListener('click', (e) => { e.stopPropagation(); setEpic(btn.dataset.setEpic); });
+      });
 
       // Editable ticket fields
       app.querySelectorAll('.editable-status').forEach(el => {
-        el.addEventListener('click', (e) => { e.stopPropagation(); editStatus(el.dataset.key, '', el); });
+        el.addEventListener('click', (e) => { e.stopPropagation(); editStatus(el.dataset.key, '', el, el.dataset.isEpic === 'true'); });
       });
       app.querySelectorAll('.editable-priority').forEach(el => {
         el.addEventListener('click', (e) => { e.stopPropagation(); editPriority(el.dataset.key, el); });
