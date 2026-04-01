@@ -1593,6 +1593,28 @@ function getDashboardHTML() {
           details.appendChild(spRow);
         }
 
+        // Editable priority selector (for link/update flows)
+        let priSelect = null;
+        if (opts.priSelect) {
+          const priRow = document.createElement('div');
+          priRow.style.cssText = 'margin-top:0.5rem;display:flex;align-items:center;gap:0.5rem;font-size:0.85rem;';
+          const priLabel = document.createElement('span');
+          priLabel.style.color = 'var(--text-muted)';
+          priLabel.textContent = 'Priority:';
+          priSelect = document.createElement('select');
+          priSelect.style.cssText = 'padding:0.3rem 0.4rem;background:var(--bg1);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.85rem;';
+          for (const v of ['Blocker', 'Critical', 'Major', 'Normal', 'Minor']) {
+            const o = document.createElement('option');
+            o.value = v;
+            o.textContent = v;
+            if (opts.priSelect.current === v) o.selected = true;
+            priSelect.appendChild(o);
+          }
+          priRow.appendChild(priLabel);
+          priRow.appendChild(priSelect);
+          details.appendChild(priRow);
+        }
+
         modal.appendChild(details);
 
         const actions = document.createElement('div');
@@ -1606,8 +1628,12 @@ function getDashboardHTML() {
         confirmBtn.textContent = opts.buttonText || (opts.hideDetails ? 'Confirm' : 'Create Ticket');
         confirmBtn.addEventListener('click', () => {
           overlay.remove();
-          if (spSelect) {
-            resolve({ confirmed: true, storyPoints: spSelect.value ? parseFloat(spSelect.value) : null });
+          if (spSelect || priSelect) {
+            resolve({
+              confirmed: true,
+              storyPoints: spSelect?.value ? parseFloat(spSelect.value) : null,
+              priority: priSelect?.value || null,
+            });
           } else {
             resolve(true);
           }
@@ -2163,10 +2189,11 @@ function getDashboardHTML() {
 
       function renderList(filter) {
         listEl.textContent = '';
-        const allTickets = DATA?.tickets || [];
+        const allTickets = (DATA?.tickets || []).filter(t => t.type !== 'Epic');
         const filtered = filter
           ? allTickets.filter(t => t.key.toLowerCase().includes(filter) || t.summary.toLowerCase().includes(filter))
-          : allTickets;
+          : allTickets.slice();
+        filtered.sort((a, b) => b.key.localeCompare(a.key, undefined, { numeric: true }));
 
         if (!filtered.length) {
           const empty = document.createElement('div');
@@ -2207,19 +2234,24 @@ function getDashboardHTML() {
               buttonText: 'Update Ticket',
               hideDetails: true,
               spSelect: { current: t.story_points || null },
+              priSelect: { current: t.priority || 'Major' },
             });
             if (!result) return;
-            // Update story points if changed
+            // Update story points and priority if changed
+            const fields = {};
             if (result.storyPoints !== undefined) {
               const currentSP = t.story_points || null;
-              const newSP = result.storyPoints;
-              if (newSP !== currentSP) {
-                await fetch('/api/jira/update', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ key: t.key, fields: { customfield_10028: newSP } }),
-                });
-              }
+              if (result.storyPoints !== currentSP) fields.customfield_10028 = result.storyPoints;
+            }
+            if (result.priority && result.priority !== t.priority) {
+              fields.priority = { name: result.priority };
+            }
+            if (Object.keys(fields).length) {
+              await fetch('/api/jira/update', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ key: t.key, fields }),
+              });
             }
             await triageItem(hash, 'jira', t.key, text, meeting);
             overlay.remove();
@@ -2507,6 +2539,7 @@ function getDashboardHTML() {
     let tableCounter = 0;
     function renderTicketTable(tickets, options) {
       const showSprint = options?.showSprint || false;
+      const hideTotalSP = options?.hideTotalSP || false;
       const sprintLabel = (t) => t.sprint || t.future_sprint || t.last_sprint || 'Backlog';
       const colSpan = showSprint ? 6 : 5;
       if (!tickets || !tickets.length) return '<p class="empty">No tickets</p>';
@@ -2586,7 +2619,7 @@ function getDashboardHTML() {
       else if (totalSP > 34) spClass = 'sp-red';
       else if (totalSP > 21) spClass = 'sp-yellow';
       const spTooltip = noSP ? 'No story points set on any tickets' : (totalSP > 34 ? 'Overloaded (35+)' : totalSP > 21 ? 'Heavy sprint (22-34)' : 'Comfortable capacity (0-21)');
-      const spFooter = '<div style="text-align:right;margin-top:0.3rem;"><span class="sp-total ' + spClass + '" title="' + spTooltip + '">Total Story Points: ' + totalSP + '</span></div>';
+      const spFooter = hideTotalSP ? '' : '<div style="text-align:right;margin-top:0.3rem;"><span class="sp-total ' + spClass + '" title="' + spTooltip + '">Total Story Points: ' + totalSP + '</span></div>';
       return '<table><tr><th>Ticket</th><th>Summary</th><th>Status</th><th>Priority</th><th>SP</th>' + (showSprint ? '<th>Sprint</th>' : '') + '</tr>' + rows + '</table>' + spFooter;
     }
 
@@ -2698,7 +2731,8 @@ function getDashboardHTML() {
         const fs = sortedFutureSprints();
         for (let i = 0; i < fs.length; i++) {
           const tabId = 'future-' + i;
-          html += '<div class="tab' + (activeTab === tabId ? ' active' : '') + '" data-tab="' + tabId + '">Next: ' + esc(fs[i].name) + ' (' + countTasks(fs[i].tickets) + ')</div>';
+          const fsPrefix = i === 0 ? 'Next' : 'Future';
+          html += '<div class="tab' + (activeTab === tabId ? ' active' : '') + '" data-tab="' + tabId + '">' + fsPrefix + ': ' + esc(fs[i].name) + ' (' + countTasks(fs[i].tickets) + ')</div>';
         }
         html += '<div class="tab' + (activeTab === 'last-sprint' ? ' active' : '') + '" data-tab="last-sprint">Last: ' + esc(lastSprintName || 'None') + ' (' + countTasks(lastSprintTickets) + ')</div>';
         html += '<div class="tab' + (activeTab === 'backlog' ? ' active' : '') + '" data-tab="backlog">Backlog (' + countTasks(backlogTickets) + ')</div>';
@@ -2728,8 +2762,8 @@ function getDashboardHTML() {
         }
         // Note: fs is already sorted above, tab IDs are stable per render
         html += '<div class="tab-content' + (activeTab === 'last-sprint' ? ' active' : '') + '" id="tab-last-sprint">' + renderTicketTable(lastSprintTickets) + '</div>';
-        html += '<div class="tab-content' + (activeTab === 'backlog' ? ' active' : '') + '" id="tab-backlog">' + renderTicketTable(backlogTickets) + '</div>';
-        html += '<div class="tab-content' + (activeTab === 'all' ? ' active' : '') + '" id="tab-all">' + renderTicketTable(tickets, { showSprint: true }) + '</div>';
+        html += '<div class="tab-content' + (activeTab === 'backlog' ? ' active' : '') + '" id="tab-backlog">' + renderTicketTable(backlogTickets, { hideTotalSP: true }) + '</div>';
+        html += '<div class="tab-content' + (activeTab === 'all' ? ' active' : '') + '" id="tab-all">' + renderTicketTable(tickets, { showSprint: true, hideTotalSP: true }) + '</div>';
       } else {
         // No sprints — show all tickets in a single flat view
         html += renderTicketTable(tickets);
