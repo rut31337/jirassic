@@ -2702,7 +2702,7 @@ function getDashboardHTML() {
         }
         html += '<div class="tab' + (activeTab === 'last-sprint' ? ' active' : '') + '" data-tab="last-sprint">Last: ' + esc(lastSprintName || 'None') + ' (' + countTasks(lastSprintTickets) + ')</div>';
         html += '<div class="tab' + (activeTab === 'backlog' ? ' active' : '') + '" data-tab="backlog">Backlog (' + countTasks(backlogTickets) + ')</div>';
-        html += '<div class="tab' + (activeTab === 'all' ? ' active' : '') + '" data-tab="all">All Open (' + countTasks(tickets) + ')</div>';
+        html += '<div class="tab' + (activeTab === 'all' ? ' active' : '') + '" data-tab="all">All Tickets (' + countTasks(tickets) + ')</div>';
         html += '</div>';
         // Sprint progress bar
         let sprintProgressHtml = '';
