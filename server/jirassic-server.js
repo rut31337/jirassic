@@ -1307,7 +1307,7 @@ function getDashboardHTML() {
     .epic-item { padding: 0.5rem; border: 1px solid var(--border); border-radius: 4px; margin-bottom: 0.3rem; cursor: pointer; display: flex; gap: 0.5rem; align-items: center; overflow: hidden; }
     .epic-item:hover { background: var(--bg3); border-color: var(--link); }
     .epic-item .epic-key { color: var(--link); font-size: 0.85rem; flex-shrink: 0; }
-    .epic-item .epic-summary { color: var(--text); font-size: 0.85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .epic-item .epic-summary { color: var(--text); font-size: 0.85rem; }
     .modal-input { width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 6px 8px; border-radius: 4px; font-size: 0.9rem; margin-bottom: 0.5rem; }
     .modal-input:focus { border-color: var(--link); outline: none; }
     .modal-input::placeholder { color: var(--text-muted); }
@@ -2394,7 +2394,7 @@ function getDashboardHTML() {
           item.appendChild(keySpan);
           item.appendChild(summarySpan);
           item.addEventListener('click', async () => {
-            const summary = text.length > 100 ? text.substring(0, 100) + '...' : text;
+            const summary = text.replace(/^\[.*?\]\s*/, '');
             const assignToMe = document.getElementById('assign-me')?.checked ?? true;
             const storyPoints = document.getElementById('story-points')?.value || null;
             const sprintId2 = document.getElementById('create-sprint')?.value || null;
