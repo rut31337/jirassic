@@ -2687,6 +2687,8 @@ function getDashboardHTML() {
       html += '<div class="multi-select" id="ms-priority"><button class="multi-select-btn" type="button">Priority' + (priCount ? ' <span class="count">' + priCount + '</span>' : '') + '</button><div class="multi-select-menu">';
       for (const p of allPriorities) html += '<label><input type="checkbox" value="' + esc(p) + '"' + (ticketPriorityFilters.has(p) ? ' checked' : '') + '>' + esc(p) + '</label>';
       html += '</div></div>';
+      html += '<button id="filter-open-btn" class="move-btn" type="button">All Open</button>';
+      html += '<button id="expand-all-btn" class="move-btn" type="button">Expand All</button>';
       html += '</div>';
       const countTasks = (arr) => arr.filter(t => t.type !== 'Epic').length;
 
@@ -2713,7 +2715,10 @@ function getDashboardHTML() {
           const pct = Math.round((elapsed / total) * 100);
           const daysLeft = Math.max(0, Math.ceil((end - now) / 86400000));
           const barColor = pct > 85 ? '#da3633' : pct > 60 ? '#e3b341' : '#238636';
-          sprintProgressHtml = '<div class="sprint-info"><span>' + daysLeft + ' day' + (daysLeft !== 1 ? 's' : '') + ' remaining in sprint</span><span>' + pct + '% elapsed</span></div>'
+          const openCount = sprintTickets.filter(t => t.type !== 'Epic' && t.status !== 'Closed' && t.status !== 'Done').length;
+          const sprintEmoji = (pct >= 90 && openCount === 0) ? '👍' : (pct >= 90 && openCount > 0) ? '⚠️' : '';
+          const openLabel = openCount + ' open ticket' + (openCount !== 1 ? 's' : '');
+          sprintProgressHtml = '<div class="sprint-info"><span>' + (sprintEmoji ? sprintEmoji + ' ' : '') + daysLeft + ' day' + (daysLeft !== 1 ? 's' : '') + ' remaining · ' + openLabel + '</span><span>' + pct + '% elapsed</span></div>'
             + '<div class="sprint-bar"><div class="sprint-bar-fill" style="width:' + pct + '%;background:' + barColor + '"></div></div>';
         }
         html += '<div class="tab-content' + (activeTab === 'sprint' ? ' active' : '') + '" id="tab-sprint">' + sprintProgressHtml + renderTicketTable(sprintTickets) + '</div>';
@@ -2848,6 +2853,45 @@ function getDashboardHTML() {
       app.querySelectorAll('[data-set-epic]').forEach(btn => {
         btn.addEventListener('click', (e) => { e.stopPropagation(); setEpic(btn.dataset.setEpic); });
       });
+
+      // Expand/collapse all
+      const expandAllBtn = document.getElementById('expand-all-btn');
+      if (expandAllBtn) {
+        expandAllBtn.addEventListener('click', () => {
+          const allEpicIds = [];
+          app.querySelectorAll('[data-toggle-epic]').forEach(row => allEpicIds.push(row.dataset.toggleEpic));
+          const allExpanded = allEpicIds.every(eid => expandedState['epic-' + eid]);
+          for (const eid of allEpicIds) {
+            expandedState['epic-' + eid] = !allExpanded;
+            const arrow = document.getElementById('arrow-' + eid);
+            if (arrow) arrow.textContent = allExpanded ? '\\u25B6' : '\\u25BC';
+          }
+          expandAllBtn.textContent = allExpanded ? 'Expand All' : 'Collapse All';
+          filterTicketRows();
+        });
+        // Set initial label
+        const allEpicIds = [];
+        app.querySelectorAll('[data-toggle-epic]').forEach(row => allEpicIds.push(row.dataset.toggleEpic));
+        if (allEpicIds.length && allEpicIds.every(eid => expandedState['epic-' + eid])) {
+          expandAllBtn.textContent = 'Collapse All';
+        }
+      }
+
+      // Open tickets filter shortcut
+      const filterOpenBtn = document.getElementById('filter-open-btn');
+      if (filterOpenBtn) {
+        filterOpenBtn.addEventListener('click', () => {
+          const closedStatuses = ['Closed', 'Done'];
+          const allStatuses = new Set();
+          (DATA?.tickets || []).forEach(t => { if (t.type !== 'Epic') allStatuses.add(t.status); });
+          const isActive = ticketStatusFilters.size > 0 && [...ticketStatusFilters].every(s => !closedStatuses.includes(s));
+          ticketStatusFilters.clear();
+          if (!isActive) {
+            allStatuses.forEach(s => { if (!closedStatuses.includes(s)) ticketStatusFilters.add(s); });
+          }
+          render();
+        });
+      }
 
       // Editable ticket fields
       app.querySelectorAll('.editable-status').forEach(el => {
