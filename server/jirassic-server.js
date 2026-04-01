@@ -1347,12 +1347,15 @@ function getDashboardHTML() {
     const JIRA_SITE = ${JSON.stringify(JIRA_SITE)};
     let DATA = null;
     let activeTab = 'sprint';
+    function sortedFutureSprints() {
+      return (DATA?.futureSprints || []).slice().sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    }
     function getActiveTabSprint() {
       if (!DATA) return { id: null, name: null };
       if (activeTab === 'sprint') return { id: DATA.sprintId || null, name: DATA.sprintName || null };
       if (activeTab.startsWith('future-')) {
         const idx = parseInt(activeTab.split('-')[1], 10);
-        const fs = DATA.futureSprints || [];
+        const fs = sortedFutureSprints();
         return { id: fs[idx]?.id || null, name: fs[idx]?.name || null };
       }
       return { id: null, name: null };
@@ -2690,7 +2693,7 @@ function getDashboardHTML() {
       if (DATA.sprintsEnabled) {
         html += '<div class="tabs">';
         html += '<div class="tab' + (activeTab === 'sprint' ? ' active' : '') + '" data-tab="sprint">Current: ' + esc(sprintName || 'None') + ' (' + countTasks(sprintTickets) + ')</div>';
-        const fs = futureSprints || [];
+        const fs = sortedFutureSprints();
         for (let i = 0; i < fs.length; i++) {
           const tabId = 'future-' + i;
           html += '<div class="tab' + (activeTab === tabId ? ' active' : '') + '" data-tab="' + tabId + '">Next: ' + esc(fs[i].name) + ' (' + countTasks(fs[i].tickets) + ')</div>';
@@ -2718,6 +2721,7 @@ function getDashboardHTML() {
           const tabId = 'future-' + i;
           html += '<div class="tab-content' + (activeTab === tabId ? ' active' : '') + '" id="tab-' + tabId + '">' + renderTicketTable(fs[i].tickets) + '</div>';
         }
+        // Note: fs is already sorted above, tab IDs are stable per render
         html += '<div class="tab-content' + (activeTab === 'last-sprint' ? ' active' : '') + '" id="tab-last-sprint">' + renderTicketTable(lastSprintTickets) + '</div>';
         html += '<div class="tab-content' + (activeTab === 'backlog' ? ' active' : '') + '" id="tab-backlog">' + renderTicketTable(backlogTickets) + '</div>';
         html += '<div class="tab-content' + (activeTab === 'all' ? ' active' : '') + '" id="tab-all">' + renderTicketTable(tickets, { showSprint: true }) + '</div>';
