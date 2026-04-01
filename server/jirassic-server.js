@@ -176,9 +176,13 @@ function buildData(actionItems, tickets) {
 
   // Find the most recent closed sprint (highest sprint number)
   let lastSprintName = "";
+  let lastSprintStart = "";
+  let lastSprintEnd = "";
   for (const t of tickets) {
     if (t.last_sprint && (!lastSprintName || t.last_sprint.localeCompare(lastSprintName, undefined, { numeric: true }) > 0)) {
       lastSprintName = t.last_sprint;
+      lastSprintStart = t.last_sprint_start || "";
+      lastSprintEnd = t.last_sprint_end || "";
     }
   }
   const lastSprintTickets = lastSprintName
@@ -193,7 +197,7 @@ function buildData(actionItems, tickets) {
       futureSprintMap[t.future_sprint].push(t);
     }
   }
-  const futureSprints = Object.entries(futureSprintMap).map(([name, tix]) => ({ name, id: tix[0]?.future_sprint_id || null, tickets: tix }));
+  const futureSprints = Object.entries(futureSprintMap).map(([name, tix]) => ({ name, id: tix[0]?.future_sprint_id || null, start: tix[0]?.future_sprint_start || null, end: tix[0]?.future_sprint_end || null, tickets: tix }));
 
   // Closed tickets only appear if they belong to current, last, or future sprint
   const closedStatuses = new Set(['Closed', 'Done']);
@@ -234,6 +238,8 @@ function buildData(actionItems, tickets) {
     sprintEnd,
     lastSprintTickets,
     lastSprintName,
+    lastSprintStart,
+    lastSprintEnd,
     futureSprints,
     backlogTickets,
     sprintsEnabled: process.env.TRIAGE_SPRINTS !== "false",
@@ -1364,6 +1370,7 @@ function getDashboardHTML() {
     let ticketSearchTerm = '';
     let ticketStatusFilters = new Set();
     let ticketPriorityFilters = new Set();
+    let ticketSPFilters = new Set();
     const expandedState = {}; // track which collapsibles are expanded
 
     // Check if a ticket row matches the current filters
@@ -1380,13 +1387,20 @@ function getDashboardHTML() {
         if (priCell && !ticketPriorityFilters.has(priCell.textContent.trim())) return false;
         if (!priCell) return false;
       }
+      if (ticketSPFilters.size) {
+        const spCell = row.querySelector('.editable-sp');
+        if (!spCell) return false;
+        const spVal = spCell.textContent.trim();
+        const spLabel = spVal === '⚠️' || !spVal ? 'None' : spVal;
+        if (!ticketSPFilters.has(spLabel)) return false;
+      }
       return true;
     }
 
     // Filter ticket table rows by search term, status, and priority
     function filterTicketRows() {
-      const hasFilters = ticketSearchTerm || ticketStatusFilters.size || ticketPriorityFilters.size;
-      const hasStatusOrPriority = ticketStatusFilters.size || ticketPriorityFilters.size;
+      const hasFilters = ticketSearchTerm || ticketStatusFilters.size || ticketPriorityFilters.size || ticketSPFilters.size;
+      const hasStatusOrPriority = ticketStatusFilters.size || ticketPriorityFilters.size || ticketSPFilters.size;
       document.querySelectorAll('.tab-content').forEach(tab => {
         tab.querySelectorAll('table tr').forEach(row => {
           if (row.querySelector('th')) return; // skip header
@@ -2721,6 +2735,11 @@ function getDashboardHTML() {
       html += '<div class="multi-select" id="ms-priority"><button class="multi-select-btn" type="button">Priority' + (priCount ? ' <span class="count">' + priCount + '</span>' : '') + '</button><div class="multi-select-menu">';
       for (const p of allPriorities) html += '<label><input type="checkbox" value="' + esc(p) + '"' + (ticketPriorityFilters.has(p) ? ' checked' : '') + '>' + esc(p) + '</label>';
       html += '</div></div>';
+      const allSPs = [...new Set(tickets.filter(t => t.type !== 'Epic').map(t => t.story_points ? String(t.story_points) : 'None'))].sort((a, b) => { if (a === 'None') return 1; if (b === 'None') return -1; return parseFloat(a) - parseFloat(b); });
+      const spCount = ticketSPFilters.size;
+      html += '<div class="multi-select" id="ms-sp"><button class="multi-select-btn" type="button">SP' + (spCount ? ' <span class="count">' + spCount + '</span>' : '') + '</button><div class="multi-select-menu">';
+      for (const sp of allSPs) html += '<label><input type="checkbox" value="' + esc(sp) + '"' + (ticketSPFilters.has(sp) ? ' checked' : '') + '>' + esc(sp) + '</label>';
+      html += '</div></div>';
       html += '<button id="filter-open-btn" class="move-btn" type="button">All Open</button>';
       html += '<button id="expand-all-btn" class="move-btn" type="button">Expand All</button>';
       html += '</div>';
@@ -2739,6 +2758,14 @@ function getDashboardHTML() {
         html += '<div class="tab' + (activeTab === 'backlog' ? ' active' : '') + '" data-tab="backlog">Backlog (' + countTasks(backlogTickets) + ')</div>';
         html += '<div class="tab' + (activeTab === 'all' ? ' active' : '') + '" data-tab="all">All Tickets (' + countTasks(tickets) + ')</div>';
         html += '</div>';
+        // Sprint date range formatter
+        function formatDateRange(startStr, endStr) {
+          if (!startStr || !endStr) return '';
+          const s = new Date(startStr);
+          const e = new Date(endStr);
+          const opts = { month: 'short', day: 'numeric' };
+          return s.toLocaleDateString(undefined, opts) + ' – ' + e.toLocaleDateString(undefined, opts);
+        }
         // Sprint progress bar
         let sprintProgressHtml = '';
         if (sprintStart && sprintEnd) {
@@ -2753,16 +2780,23 @@ function getDashboardHTML() {
           const openCount = sprintTickets.filter(t => t.type !== 'Epic' && t.status !== 'Closed' && t.status !== 'Done').length;
           const sprintEmoji = (pct >= 90 && openCount === 0) ? '👍' : (pct >= 90 && openCount > 0) ? '⚠️' : '';
           const openLabel = openCount + ' open ticket' + (openCount !== 1 ? 's' : '');
-          sprintProgressHtml = '<div class="sprint-info"><span>' + (sprintEmoji ? sprintEmoji + ' ' : '') + daysLeft + ' day' + (daysLeft !== 1 ? 's' : '') + ' remaining · ' + openLabel + '</span><span>' + pct + '% elapsed</span></div>'
+          const dateRange = formatDateRange(sprintStart, sprintEnd);
+          const sprintOverdue = now > end;
+          const overdueLabel = sprintOverdue ? ' <span style="color:#da3633" title="Sprint end date has passed — sprint needs to be closed">⚠️ Needs closing</span>' : '';
+          sprintProgressHtml = '<div class="sprint-info"><span>' + (sprintEmoji ? sprintEmoji + ' ' : '') + daysLeft + ' day' + (daysLeft !== 1 ? 's' : '') + ' remaining · ' + openLabel + '</span><span>' + (dateRange ? dateRange + overdueLabel + ' · ' : '') + pct + '% elapsed</span></div>'
             + '<div class="sprint-bar"><div class="sprint-bar-fill" style="width:' + pct + '%;background:' + barColor + '"></div></div>';
         }
         html += '<div class="tab-content' + (activeTab === 'sprint' ? ' active' : '') + '" id="tab-sprint">' + sprintProgressHtml + renderTicketTable(sprintTickets) + '</div>';
         for (let i = 0; i < fs.length; i++) {
           const tabId = 'future-' + i;
-          html += '<div class="tab-content' + (activeTab === tabId ? ' active' : '') + '" id="tab-' + tabId + '">' + renderTicketTable(fs[i].tickets) + '</div>';
+          const fsDateRange = formatDateRange(fs[i].start, fs[i].end);
+          const fsHeader = fsDateRange ? '<div class="sprint-info" style="margin-bottom:0.5rem"><span>' + fsDateRange + '</span></div>' : '';
+          html += '<div class="tab-content' + (activeTab === tabId ? ' active' : '') + '" id="tab-' + tabId + '">' + fsHeader + renderTicketTable(fs[i].tickets) + '</div>';
         }
         // Note: fs is already sorted above, tab IDs are stable per render
-        html += '<div class="tab-content' + (activeTab === 'last-sprint' ? ' active' : '') + '" id="tab-last-sprint">' + renderTicketTable(lastSprintTickets) + '</div>';
+        const lastDateRange = formatDateRange(DATA.lastSprintStart, DATA.lastSprintEnd);
+        const lastHeader = lastDateRange ? '<div class="sprint-info" style="margin-bottom:0.5rem"><span>' + lastDateRange + '</span></div>' : '';
+        html += '<div class="tab-content' + (activeTab === 'last-sprint' ? ' active' : '') + '" id="tab-last-sprint">' + lastHeader + renderTicketTable(lastSprintTickets) + '</div>';
         html += '<div class="tab-content' + (activeTab === 'backlog' ? ' active' : '') + '" id="tab-backlog">' + renderTicketTable(backlogTickets, { hideTotalSP: true }) + '</div>';
         html += '<div class="tab-content' + (activeTab === 'all' ? ' active' : '') + '" id="tab-all">' + renderTicketTable(tickets, { showSprint: true, hideTotalSP: true }) + '</div>';
       } else {
@@ -2844,8 +2878,9 @@ function getDashboardHTML() {
         const btn = ms.querySelector('.multi-select-btn');
         const menu = ms.querySelector('.multi-select-menu');
         const isStatus = ms.id === 'ms-status';
-        const filterSet = isStatus ? ticketStatusFilters : ticketPriorityFilters;
-        const label = isStatus ? 'Status' : 'Priority';
+        const isSP = ms.id === 'ms-sp';
+        const filterSet = isStatus ? ticketStatusFilters : isSP ? ticketSPFilters : ticketPriorityFilters;
+        const label = isStatus ? 'Status' : isSP ? 'SP' : 'Priority';
         btn.addEventListener('click', (e) => {
           e.stopPropagation();
           document.querySelectorAll('.multi-select-menu.open').forEach(m => { if (m !== menu) m.classList.remove('open'); });

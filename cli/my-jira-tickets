@@ -156,8 +156,12 @@ def parse_tickets(data):
             "sprint_end": active_sprint.get("endDate") if active_sprint else None,
             "last_sprint": last_closed_sprint.get("name") if last_closed_sprint else None,
             "last_sprint_id": last_closed_sprint.get("id") if last_closed_sprint else None,
+            "last_sprint_start": last_closed_sprint.get("startDate") if last_closed_sprint else None,
+            "last_sprint_end": last_closed_sprint.get("endDate") if last_closed_sprint else None,
             "future_sprint": future_sprint.get("name") if future_sprint else None,
             "future_sprint_id": future_sprint.get("id") if future_sprint else None,
+            "future_sprint_start": future_sprint.get("startDate") if future_sprint else None,
+            "future_sprint_end": future_sprint.get("endDate") if future_sprint else None,
             "story_points": fields.get("customfield_10028"),
             "url": f"https://{JIRA_SITE}/browse/{issue['key']}",
         })
