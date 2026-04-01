@@ -1327,7 +1327,8 @@ function getDashboardHTML() {
     <img src="/logo.png" alt="Jirassic" style="height:120px;vertical-align:middle">
     <span style="font-size:1.2em;color:#8b949e;vertical-align:middle">Daily Triage Dashboard</span>
     <span style="display:inline-flex;align-items:center;gap:0.3rem;">
-      <input type="number" id="days-input" min="1" max="90" placeholder="${process.env.TRIAGE_DAYS || '7'}" title="Days to search" style="width:45px;padding:4px 6px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:0.85rem;text-align:center;">
+      <span style="color:var(--text-muted);font-size:0.8rem;">Meeting notes from last</span>
+      <input type="number" id="days-input" min="1" max="90" placeholder="${process.env.TRIAGE_DAYS || '7'}" title="Days of meeting notes to search" style="width:45px;padding:4px 6px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:0.85rem;text-align:center;">
       <span style="color:var(--text-muted);font-size:0.8rem;">days</span>
       <button class="refresh-btn" id="refresh-btn">Refresh</button>
     </span>
