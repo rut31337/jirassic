@@ -602,6 +602,38 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Jira API proxy — create issue link (for clone)
+  if (req.method === "POST" && req.url === "/api/jira/link") {
+    try {
+      const { fromKey, toKey } = JSON.parse(await readBody(req));
+      const email = process.env.JIRA_EMAIL;
+      const token = process.env.JIRA_API_TOKEN;
+      const auth = Buffer.from(`${email}:${token}`).toString("base64");
+      const resp = await fetch(`https://${JIRA_SITE}/rest/api/3/issueLink`, {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${auth}`,
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          type: { name: "Cloners" },
+          inwardIssue: { key: toKey },
+          outwardIssue: { key: fromKey },
+        }),
+      });
+      if (resp.status === 201 || resp.ok) {
+        json({ ok: true });
+      } else {
+        const data = await resp.json();
+        json({ error: JSON.stringify(data.errors || data.errorMessages || data) }, 400);
+      }
+    } catch (e) {
+      json({ error: e.message }, 500);
+    }
+    return;
+  }
+
   // Config page
   if (req.method === "GET" && req.url === "/config") {
     res.writeHead(200, { "Content-Type": "text/html" });
@@ -1866,6 +1898,240 @@ function getDashboardHTML() {
       }
     }
 
+    // Duplicate ticket to another sprint
+    async function duplicateTicket(key) {
+      const ticket = DATA?.tickets?.find(t => t.key === key);
+      if (!ticket) { showToast('Ticket not found'); return; }
+
+      // Fetch sprints for the picker
+      let sprints = [];
+      try {
+        const r = await fetch('/api/jira/future-sprints');
+        const d = await r.json();
+        sprints = d.sprints || [];
+      } catch {}
+
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+
+      const modal = document.createElement('div');
+      modal.className = 'modal';
+      modal.style.width = '450px';
+
+      const title = document.createElement('h3');
+      title.textContent = 'Duplicate ' + key;
+      modal.appendChild(title);
+
+      // Summary
+      const summaryInput = document.createElement('input');
+      summaryInput.className = 'modal-input';
+      summaryInput.value = ticket.summary;
+      modal.appendChild(summaryInput);
+
+      // Options row
+      const optionsDiv = document.createElement('div');
+      optionsDiv.style.cssText = 'display:flex;gap:1.5rem;align-items:center;margin:0.5rem 0;flex-wrap:wrap;';
+
+      // Assign to me
+      const assignLabel = document.createElement('label');
+      assignLabel.style.cssText = 'display:flex;align-items:center;gap:0.4rem;color:var(--text);font-size:0.85rem;cursor:pointer;';
+      const assignCheck = document.createElement('input');
+      assignCheck.type = 'checkbox';
+      assignCheck.checked = true;
+      assignLabel.appendChild(assignCheck);
+      assignLabel.appendChild(document.createTextNode('Assign to me'));
+      optionsDiv.appendChild(assignLabel);
+
+      // Priority
+      const prLabel = document.createElement('label');
+      prLabel.style.cssText = 'display:flex;align-items:center;gap:0.4rem;color:var(--text);font-size:0.85rem;';
+      prLabel.appendChild(document.createTextNode('Priority'));
+      const prSelect = document.createElement('select');
+      prSelect.style.cssText = 'background:var(--bg);border:1px solid var(--border);color:var(--text);padding:2px 6px;border-radius:4px;font-size:0.85rem;';
+      for (const v of ['Major', 'Blocker', 'Critical', 'Normal', 'Minor']) {
+        const opt = document.createElement('option');
+        opt.value = v;
+        opt.textContent = v;
+        if (v === ticket.priority) opt.selected = true;
+        prSelect.appendChild(opt);
+      }
+      prLabel.appendChild(prSelect);
+      optionsDiv.appendChild(prLabel);
+
+      // Story Points
+      const spLabel = document.createElement('label');
+      spLabel.style.cssText = 'display:flex;align-items:center;gap:0.4rem;color:var(--text);font-size:0.85rem;';
+      spLabel.appendChild(document.createTextNode('SP'));
+      const spSelect = document.createElement('select');
+      spSelect.style.cssText = 'background:var(--bg);border:1px solid var(--border);color:var(--text);padding:2px 6px;border-radius:4px;font-size:0.85rem;';
+      for (const v of ['', '1', '2', '3', '5', '8', '13', '21']) {
+        const opt = document.createElement('option');
+        opt.value = v;
+        opt.textContent = v || '—';
+        if (ticket.story_points && String(ticket.story_points) === v) opt.selected = true;
+        spSelect.appendChild(opt);
+      }
+      spLabel.appendChild(spSelect);
+      optionsDiv.appendChild(spLabel);
+
+      // Sprint
+      const sprintLabel = document.createElement('label');
+      sprintLabel.style.cssText = 'display:flex;align-items:center;gap:0.4rem;color:var(--text);font-size:0.85rem;';
+      sprintLabel.appendChild(document.createTextNode('Sprint'));
+      const sprintSelect = document.createElement('select');
+      sprintSelect.style.cssText = 'background:var(--bg);border:1px solid var(--border);color:var(--text);padding:2px 6px;border-radius:4px;font-size:0.85rem;';
+      const noSprintOpt = document.createElement('option');
+      noSprintOpt.value = '';
+      noSprintOpt.textContent = '— None —';
+      sprintSelect.appendChild(noSprintOpt);
+      let firstFutureDup = true;
+      for (const s of sprints) {
+        const opt = document.createElement('option');
+        opt.value = s.id;
+        let suffix = '';
+        if (s.state === 'active') suffix = ' (current)';
+        else if (s.state === 'future' && firstFutureDup) { suffix = ' (next)'; opt.selected = true; firstFutureDup = false; }
+        opt.textContent = s.name + suffix;
+        sprintSelect.appendChild(opt);
+      }
+      sprintLabel.appendChild(sprintSelect);
+      optionsDiv.appendChild(sprintLabel);
+
+      modal.appendChild(optionsDiv);
+
+      // Epic selector (searchable)
+      const epics = (DATA?.tickets || []).filter(t => t.type === 'Epic');
+      let dupEpicKey = ticket.parent || '';
+      if (epics.length) {
+        const epicDiv = document.createElement('div');
+        epicDiv.style.cssText = 'margin:0.5rem 0;';
+        const epicLabelEl = document.createElement('div');
+        epicLabelEl.style.cssText = 'color:var(--text-muted);font-size:0.85rem;margin-bottom:0.3rem;';
+        epicLabelEl.textContent = 'Epic';
+        epicDiv.appendChild(epicLabelEl);
+        const epicSearch = document.createElement('input');
+        epicSearch.type = 'text';
+        epicSearch.placeholder = 'Search epics... (leave empty for standalone)';
+        epicSearch.style.cssText = 'width:100%;padding:0.4rem 0.6rem;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:0.85rem;box-sizing:border-box;';
+        epicDiv.appendChild(epicSearch);
+        const epicList = document.createElement('div');
+        epicList.className = 'epic-list';
+        epicList.style.marginTop = '0.3rem';
+        const selectedDisplay = document.createElement('div');
+        selectedDisplay.style.cssText = 'display:none;margin-top:0.3rem;padding:0.4rem 0.6rem;background:var(--bg3);border:1px solid var(--border);border-radius:4px;font-size:0.85rem;color:var(--text);cursor:pointer;';
+        selectedDisplay.title = 'Click to change';
+        selectedDisplay.addEventListener('click', () => {
+          dupEpicKey = '';
+          selectedDisplay.style.display = 'none';
+          epicSearch.style.display = '';
+          epicList.style.display = '';
+          epicSearch.focus();
+        });
+        epicDiv.appendChild(selectedDisplay);
+        for (const ep of epics) {
+          const item = document.createElement('div');
+          item.className = 'epic-item';
+          const keySpan = document.createElement('span');
+          keySpan.className = 'epic-key';
+          keySpan.textContent = ep.key;
+          const summarySpan = document.createElement('span');
+          summarySpan.className = 'epic-summary';
+          summarySpan.textContent = ep.summary;
+          item.appendChild(keySpan);
+          item.appendChild(summarySpan);
+          item.addEventListener('click', () => {
+            dupEpicKey = ep.key;
+            selectedDisplay.textContent = ep.key + ': ' + ep.summary;
+            selectedDisplay.style.display = '';
+            epicSearch.style.display = 'none';
+            epicList.style.display = 'none';
+          });
+          epicList.appendChild(item);
+        }
+        epicDiv.appendChild(epicList);
+        epicSearch.addEventListener('input', () => {
+          const q = epicSearch.value.toLowerCase();
+          for (const child of epicList.children) {
+            child.style.display = child.textContent.toLowerCase().includes(q) ? '' : 'none';
+          }
+        });
+        // Pre-select if ticket has a parent
+        if (ticket.parent) {
+          const parentEpic = epics.find(e => e.key === ticket.parent);
+          if (parentEpic) {
+            selectedDisplay.textContent = parentEpic.key + ': ' + parentEpic.summary;
+            selectedDisplay.style.display = '';
+            epicSearch.style.display = 'none';
+            epicList.style.display = 'none';
+          }
+        }
+        modal.appendChild(epicDiv);
+      }
+
+      // Actions
+      const actions = document.createElement('div');
+      actions.className = 'modal-actions';
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'modal-btn cancel';
+      cancelBtn.textContent = 'Cancel';
+      cancelBtn.addEventListener('click', () => overlay.remove());
+
+      async function doCreate(withLink) {
+        const summary = summaryInput.value.trim();
+        if (!summary) { summaryInput.style.borderColor = '#da3633'; summaryInput.focus(); return; }
+        const body = {
+          summary,
+          assignToMe: assignCheck.checked,
+          priority: prSelect.value,
+        };
+        if (dupEpicKey) body.epicKey = dupEpicKey;
+        if (spSelect.value) body.storyPoints = spSelect.value;
+        if (sprintSelect.value) body.sprintId = sprintSelect.value;
+
+        const resp = await fetch('/api/jira/create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const result = await resp.json();
+        if (result.ok) {
+          if (withLink) {
+            await fetch('/api/jira/link', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ fromKey: key, toKey: result.key }),
+            });
+          }
+          showToast('Created ' + result.key + (withLink ? ' (linked to ' + key + ')' : ''));
+          overlay.remove();
+          setTimeout(() => fetch('/api/refresh', { method: 'POST' }), 1500);
+        } else {
+          showToast('Error: ' + (result.error || 'unknown'));
+        }
+      }
+
+      const newBtn = document.createElement('button');
+      newBtn.className = 'modal-btn create';
+      newBtn.textContent = 'Create New';
+      newBtn.addEventListener('click', () => doCreate(false));
+
+      const cloneBtn = document.createElement('button');
+      cloneBtn.className = 'modal-btn create';
+      cloneBtn.textContent = 'Clone & Link';
+      cloneBtn.title = 'Creates a new ticket and adds a "cloned by" link to the original';
+      cloneBtn.addEventListener('click', () => doCreate(true));
+
+      actions.appendChild(cancelBtn);
+      actions.appendChild(newBtn);
+      actions.appendChild(cloneBtn);
+      modal.appendChild(actions);
+
+      overlay.appendChild(modal);
+      document.body.appendChild(overlay);
+      summaryInput.focus();
+    }
+
         // Move to sprint (with future sprint picker)
     async function moveToNextSprint(key) {
       const ticket = DATA?.tickets?.find(t => t.key === key);
@@ -2581,7 +2847,7 @@ function getDashboardHTML() {
           const epicStatusCell = epicStatusHidden
             ? '<td class="editable-status" data-key="' + esc(info.key) + '" data-is-epic="true" style="cursor:pointer;min-width:3rem" title="Click to set status">—</td>'
             : '<td class="editable-status" data-key="' + esc(info.key) + '" data-is-epic="true" style="cursor:pointer"><span class="badge status-' + sc + '">' + esc(info.status) + '</span></td>';
-          rows += '<tr class="epic-row" data-toggle-epic="' + eid + '"><td><span class="epic-arrow" id="arrow-' + eid + '">\\u25B6</span>' + jiraLink(info.key) + '<span class="badge epic">EPIC</span><button class="move-btn" data-move="' + esc(info.key) + '" title="Change sprint">Sprint</button></td><td class="editable-summary" data-key="' + esc(info.key) + '" data-summary="' + esc(info.summary) + '" style="cursor:pointer">' + esc(info.summary) + ' <span style="color:#484f58;font-size:0.8rem">(' + childCount + ')</span></td>' + epicStatusCell + '<td class="editable-priority" data-key="' + esc(info.key) + '" style="cursor:pointer">' + esc(info.priority) + '</td><td>' + epicSPDisplay + '</td>' + (showSprint ? '<td></td>' : '') + '</tr>';
+          rows += '<tr class="epic-row" data-toggle-epic="' + eid + '"><td><span class="epic-arrow" id="arrow-' + eid + '">\\u25B6</span>' + jiraLink(info.key) + '<span class="badge epic">EPIC</span></td><td class="editable-summary" data-key="' + esc(info.key) + '" data-summary="' + esc(info.summary) + '" style="cursor:pointer">' + esc(info.summary) + ' <span style="color:#484f58;font-size:0.8rem">(' + childCount + ')</span></td>' + epicStatusCell + '<td class="editable-priority" data-key="' + esc(info.key) + '" style="cursor:pointer">' + esc(info.priority) + '</td><td>' + epicSPDisplay + '</td>' + (showSprint ? '<td></td>' : '') + '</tr>';
         } else {
           const allTicketInfo = (DATA?.tickets || []).find(t => t.key === key);
           const parentInfo = parentCache[key] || (allTicketInfo ? { summary: allTicketInfo.summary, status: allTicketInfo.status } : null);
@@ -2597,14 +2863,14 @@ function getDashboardHTML() {
           const statusCell2 = epicStatusHidden2
             ? '<td class="editable-status" data-key="' + esc(key) + '" data-is-epic="true" style="cursor:pointer;min-width:3rem" title="Click to set status">—</td>'
             : '<td class="editable-status" data-key="' + esc(key) + '" data-is-epic="true" style="cursor:pointer"><span class="badge status-' + parentSc + '">' + esc(parentStatus) + '</span></td>';
-          rows += '<tr class="epic-row" data-toggle-epic="' + eid + '"><td><span class="epic-arrow" id="arrow-' + eid + '">\\u25B6</span>' + jiraLink(key) + '<span class="badge epic">EPIC</span>' + moveBtn2 + '</td><td>' + parentLabel + ' <span style="color:#484f58;font-size:0.8rem">(' + childCount + ')</span></td>' + statusCell2 + '<td></td><td>' + epicSPDisplay2 + '</td>' + (showSprint ? '<td></td>' : '') + '</tr>';
+          rows += '<tr class="epic-row" data-toggle-epic="' + eid + '"><td><span class="epic-arrow" id="arrow-' + eid + '">\\u25B6</span>' + jiraLink(key) + '<span class="badge epic">EPIC</span></td><td>' + parentLabel + ' <span style="color:#484f58;font-size:0.8rem">(' + childCount + ')</span></td>' + statusCell2 + '<td></td><td>' + epicSPDisplay2 + '</td>' + (showSprint ? '<td></td>' : '') + '</tr>';
         }
         for (const c of children) {
           const sc = c.status.toLowerCase().replace(/ /g, '-');
           const isClosed = c.status === 'Closed' || c.status === 'Done';
           const closedClass = isClosed ? ' ticket-closed' : '';
           const spDisplay = c.story_points ? c.story_points : '<span class="sp-warn" title="No story points set">⚠️</span>';
-          rows += '<tr class="epic-child ' + eid + closedClass + '" style="display:none"><td>' + jiraLink(c.key) + (isClosed ? '' : '<button class="move-btn" data-move="' + esc(c.key) + '" title="Change sprint">Sprint</button>') + '</td><td class="editable-summary" data-key="' + esc(c.key) + '" data-summary="' + esc(c.summary) + '" style="cursor:pointer">' + esc(c.summary) + '</td><td class="editable-status" data-key="' + esc(c.key) + '" style="cursor:pointer"><span class="badge status-' + sc + '">' + esc(c.status) + '</span></td><td class="editable-priority" data-key="' + esc(c.key) + '" style="cursor:pointer">' + esc(c.priority) + '</td><td class="editable-sp" data-key="' + esc(c.key) + '" style="cursor:pointer">' + spDisplay + '</td>' + (showSprint ? '<td style="font-size:0.8rem;color:var(--text-muted)">' + esc(sprintLabel(c)) + '</td>' : '') + '</tr>';
+          rows += '<tr class="epic-child ' + eid + closedClass + '" style="display:none"><td>' + jiraLink(c.key) + (isClosed ? '' : '<button class="move-btn" data-move="' + esc(c.key) + '" title="Change sprint">Sprint</button><button class="move-btn" data-dup="' + esc(c.key) + '" title="Duplicate ticket">Duplicate</button>') + '</td><td class="editable-summary" data-key="' + esc(c.key) + '" data-summary="' + esc(c.summary) + '" style="cursor:pointer">' + esc(c.summary) + '</td><td class="editable-status" data-key="' + esc(c.key) + '" style="cursor:pointer"><span class="badge status-' + sc + '">' + esc(c.status) + '</span></td><td class="editable-priority" data-key="' + esc(c.key) + '" style="cursor:pointer">' + esc(c.priority) + '</td><td class="editable-sp" data-key="' + esc(c.key) + '" style="cursor:pointer">' + spDisplay + '</td>' + (showSprint ? '<td style="font-size:0.8rem;color:var(--text-muted)">' + esc(sprintLabel(c)) + '</td>' : '') + '</tr>';
         }
         const epicKeyForAdd = info ? info.key : key;
         const epicSummaryForAdd = info ? info.summary : (parentCache[key]?.summary || (DATA?.tickets || []).find(t => t.key === key)?.summary || '');
@@ -2621,7 +2887,7 @@ function getDashboardHTML() {
           const isClosed = t.status === 'Closed' || t.status === 'Done';
           const closedClass = isClosed ? ' ticket-closed' : '';
           const spDisplay = t.story_points ? t.story_points : '<span class="sp-warn" title="No story points set">⚠️</span>';
-          rows += '<tr class="epic-child ' + sid + closedClass + '" style="display:none"><td>' + jiraLink(t.key) + (isClosed ? '' : '<button class="move-btn" data-move="' + esc(t.key) + '" title="Change sprint">Sprint</button><button class="move-btn" data-set-epic="' + esc(t.key) + '" title="Add to epic">Epic</button>') + '</td><td class="editable-summary" data-key="' + esc(t.key) + '" data-summary="' + esc(t.summary) + '" style="cursor:pointer">' + esc(t.summary) + '</td><td class="editable-status" data-key="' + esc(t.key) + '" style="cursor:pointer"><span class="badge status-' + sc + '">' + esc(t.status) + '</span></td><td class="editable-priority" data-key="' + esc(t.key) + '" style="cursor:pointer">' + esc(t.priority) + '</td><td class="editable-sp" data-key="' + esc(t.key) + '" style="cursor:pointer">' + spDisplay + '</td>' + (showSprint ? '<td style="font-size:0.8rem;color:var(--text-muted)">' + esc(sprintLabel(t)) + '</td>' : '') + '</tr>';
+          rows += '<tr class="epic-child ' + sid + closedClass + '" style="display:none"><td>' + jiraLink(t.key) + (isClosed ? '' : '<button class="move-btn" data-move="' + esc(t.key) + '" title="Change sprint">Sprint</button><button class="move-btn" data-set-epic="' + esc(t.key) + '" title="Add to epic">Epic</button><button class="move-btn" data-dup="' + esc(t.key) + '" title="Duplicate ticket">Duplicate</button>') + '</td><td class="editable-summary" data-key="' + esc(t.key) + '" data-summary="' + esc(t.summary) + '" style="cursor:pointer">' + esc(t.summary) + '</td><td class="editable-status" data-key="' + esc(t.key) + '" style="cursor:pointer"><span class="badge status-' + sc + '">' + esc(t.status) + '</span></td><td class="editable-priority" data-key="' + esc(t.key) + '" style="cursor:pointer">' + esc(t.priority) + '</td><td class="editable-sp" data-key="' + esc(t.key) + '" style="cursor:pointer">' + spDisplay + '</td>' + (showSprint ? '<td style="font-size:0.8rem;color:var(--text-muted)">' + esc(sprintLabel(t)) + '</td>' : '') + '</tr>';
         }
         rows += '<tr class="epic-child ' + sid + '" style="display:none"><td colspan="' + colSpan + '" style="padding-left:2.5rem"><button class="add-btn" data-add-task="">+ Add Task</button></td></tr>';
       }
@@ -2922,6 +3188,9 @@ function getDashboardHTML() {
       });
       app.querySelectorAll('[data-set-epic]').forEach(btn => {
         btn.addEventListener('click', (e) => { e.stopPropagation(); setEpic(btn.dataset.setEpic); });
+      });
+      app.querySelectorAll('[data-dup]').forEach(btn => {
+        btn.addEventListener('click', (e) => { e.stopPropagation(); duplicateTicket(btn.dataset.dup); });
       });
 
       // Expand/collapse all
