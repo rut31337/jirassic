@@ -1433,12 +1433,15 @@ function getDashboardHTML() {
     function filterTicketRows() {
       const hasFilters = ticketSearchTerm || ticketStatusFilters.size || ticketPriorityFilters.size || ticketSPFilters.size;
       const hasStatusOrPriority = ticketStatusFilters.size || ticketPriorityFilters.size || ticketSPFilters.size;
-      document.querySelectorAll('.tab-content').forEach(tab => {
-        tab.querySelectorAll('table tr').forEach(row => {
+      // Handle both tab mode (.tab-content) and flat view mode (no tabs)
+      const tabContents = document.querySelectorAll('.tab-content');
+      const containers = tabContents.length ? tabContents : [document.getElementById('app')];
+      containers.forEach(container => {
+        container.querySelectorAll('table tr').forEach(row => {
           if (row.querySelector('th')) return; // skip header
           if (row.classList.contains('epic-row')) {
             const eid = row.dataset.toggleEpic;
-            const children = eid ? tab.querySelectorAll('.' + eid) : [];
+            const children = eid ? container.querySelectorAll('.' + eid) : [];
             const isExpanded = expandedState['epic-' + eid] || false;
             if (!hasFilters) {
               row.style.display = '';
