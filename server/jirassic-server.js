@@ -2595,6 +2595,7 @@ function getDashboardHTML() {
       contextDiv.className = 'modal-context';
       contextDiv.contentEditable = 'true';
       contextDiv.style.cssText += 'cursor:text;border:1px solid transparent;padding:0.5rem;';
+      text = text.replace(/^\[.*?\]\s*/, '');
       contextDiv.textContent = text;
       contextDiv.title = 'Click to edit';
       contextDiv.addEventListener('focus', () => { contextDiv.style.borderColor = '#30363d'; });
@@ -2750,7 +2751,7 @@ function getDashboardHTML() {
       newBtn.className = 'modal-btn create';
       newBtn.textContent = 'Create Standalone Ticket';
       newBtn.addEventListener('click', async () => {
-        const summary = contextDiv.textContent.trim();
+        const summary = contextDiv.textContent.trim().replace(/^\[.*?\]\s*/, '');
         if (!summary) { contextDiv.style.borderColor = '#da3633'; contextDiv.focus(); return; }
         const assignToMe = document.getElementById('assign-me')?.checked ?? true;
         const storyPoints = document.getElementById('story-points')?.value || null;
