@@ -2571,7 +2571,11 @@ function getDashboardHTML() {
     async function loadEpics() {
       if (jiraEpics) return jiraEpics;
       const resp = await fetch('/api/jira/epics');
-      jiraEpics = await resp.json();
+      jiraEpics = (await resp.json()).sort((a, b) => {
+        const numA = parseInt(a.key.replace(/[^0-9]/g, ''), 10) || 0;
+        const numB = parseInt(b.key.replace(/[^0-9]/g, ''), 10) || 0;
+        return numA - numB;
+      });
       return jiraEpics;
     }
 
@@ -2837,7 +2841,11 @@ function getDashboardHTML() {
       }
       let rows = '';
       let epicIdx = 0;
-      for (const [key, children] of Object.entries(epicChildren)) {
+      const keyNum = (k) => parseInt(k.replace(/[^0-9]/g, ''), 10) || 0;
+      const sortByKey = (a, b) => keyNum(a.key) - keyNum(b.key);
+      const sortedEpicKeys = Object.keys(epicChildren).sort((a, b) => keyNum(a) - keyNum(b));
+      for (const key of sortedEpicKeys) {
+        const children = epicChildren[key];
         const info = epicInfo[key];
         const childCount = children.length;
         if (info && childCount === 0) continue; // skip epics with no children in this view
@@ -2869,6 +2877,7 @@ function getDashboardHTML() {
             : '<td class="editable-status" data-key="' + esc(key) + '" data-is-epic="true" style="cursor:pointer"><span class="badge status-' + parentSc + '">' + esc(parentStatus) + '</span></td>';
           rows += '<tr class="epic-row" data-toggle-epic="' + eid + '"><td><span class="epic-arrow" id="arrow-' + eid + '">\\u25B6</span>' + jiraLink(key) + '<span class="badge epic">EPIC</span></td><td>' + parentLabel + ' <span style="color:#484f58;font-size:0.8rem">(' + childCount + ')</span></td>' + statusCell2 + '<td></td><td>' + epicSPDisplay2 + '</td>' + (showSprint ? '<td></td>' : '') + '</tr>';
         }
+        children.sort(sortByKey);
         for (const c of children) {
           const sc = c.status.toLowerCase().replace(/ /g, '-');
           const isClosed = c.status === 'Closed' || c.status === 'Done';
@@ -2886,6 +2895,7 @@ function getDashboardHTML() {
         const standaloneMissingSP = standalone.filter(t => !t.story_points).length;
         const standaloneSPDisplay = (standaloneSP ? standaloneSP : '') + (standaloneMissingSP ? '<span class="sp-warn-epic" title="' + standaloneMissingSP + ' task' + (standaloneMissingSP > 1 ? 's' : '') + ' missing story points">' + standaloneMissingSP + '</span>' : '');
         rows += '<tr class="epic-row" data-toggle-epic="' + sid + '"><td><span class="epic-arrow" id="arrow-' + sid + '">\\u25B6</span>Standalone <span style="color:#484f58;font-size:0.8rem">(' + standalone.length + ')</span></td><td></td><td></td><td></td><td>' + standaloneSPDisplay + '</td>' + (showSprint ? '<td></td>' : '') + '</tr>';
+        standalone.sort(sortByKey);
         for (const t of standalone) {
           const sc = t.status.toLowerCase().replace(/ /g, '-');
           const isClosed = t.status === 'Closed' || t.status === 'Done';
