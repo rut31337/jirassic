@@ -3021,6 +3021,7 @@ function getDashboardHTML() {
       for (const sp of allSPs) html += '<label><input type="checkbox" value="' + esc(sp) + '"' + (ticketSPFilters.has(sp) ? ' checked' : '') + '>' + esc(sp) + '</label>';
       html += '</div></div>';
       html += '<button id="filter-open-btn" class="move-btn" type="button">All Open</button>';
+      html += '<button id="expand-all-open-btn" class="move-btn" type="button">Expand All Open</button>';
       html += '<button id="expand-all-btn" class="move-btn" type="button">Expand All</button>';
       html += '</div>';
       const countTasks = (arr) => arr.filter(t => t.type !== 'Epic').length;
@@ -3243,6 +3244,31 @@ function getDashboardHTML() {
             allStatuses.forEach(s => { if (!closedStatuses.includes(s)) ticketStatusFilters.add(s); });
           }
           render();
+        });
+      }
+
+      // Expand All Open: apply open filter + expand all epics
+      const expandAllOpenBtn = document.getElementById('expand-all-open-btn');
+      if (expandAllOpenBtn) {
+        expandAllOpenBtn.addEventListener('click', () => {
+          const closedStatuses = ['Closed', 'Done'];
+          const allStatuses = new Set();
+          (DATA?.tickets || []).forEach(t => { if (t.type !== 'Epic') allStatuses.add(t.status); });
+          ticketStatusFilters.clear();
+          allStatuses.forEach(s => { if (!closedStatuses.includes(s)) ticketStatusFilters.add(s); });
+          render();
+          // Set expand state after render so saveCollapseState doesn't overwrite it
+          app.querySelectorAll('[data-toggle-epic]').forEach(row => {
+            expandedState['epic-' + row.dataset.toggleEpic] = true;
+          });
+          filterTicketRows();
+          // Update arrows and Expand All button label
+          app.querySelectorAll('[data-toggle-epic]').forEach(row => {
+            const arrow = document.getElementById('arrow-' + row.dataset.toggleEpic);
+            if (arrow) arrow.textContent = '\u25BC';
+          });
+          const eab = document.getElementById('expand-all-btn');
+          if (eab) eab.textContent = 'Collapse All';
         });
       }
 
