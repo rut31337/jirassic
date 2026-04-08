@@ -3020,7 +3020,6 @@ function getDashboardHTML() {
       html += '<div class="multi-select" id="ms-sp"><button class="multi-select-btn" type="button">SP' + (spCount ? ' <span class="count">' + spCount + '</span>' : '') + '</button><div class="multi-select-menu">';
       for (const sp of allSPs) html += '<label><input type="checkbox" value="' + esc(sp) + '"' + (ticketSPFilters.has(sp) ? ' checked' : '') + '>' + esc(sp) + '</label>';
       html += '</div></div>';
-      html += '<button id="filter-open-btn" class="move-btn" type="button">All Open</button>';
       html += '<button id="expand-all-open-btn" class="move-btn" type="button">Expand All Open</button>';
       html += '<button id="expand-all-btn" class="move-btn" type="button">Expand All</button>';
       html += '</div>';
@@ -3229,22 +3228,6 @@ function getDashboardHTML() {
         if (allEpicIds.length && allEpicIds.every(eid => expandedState['epic-' + eid])) {
           expandAllBtn.textContent = 'Collapse All';
         }
-      }
-
-      // Open tickets filter shortcut
-      const filterOpenBtn = document.getElementById('filter-open-btn');
-      if (filterOpenBtn) {
-        filterOpenBtn.addEventListener('click', () => {
-          const closedStatuses = ['Closed', 'Done'];
-          const allStatuses = new Set();
-          (DATA?.tickets || []).forEach(t => { if (t.type !== 'Epic') allStatuses.add(t.status); });
-          const isActive = ticketStatusFilters.size > 0 && [...ticketStatusFilters].every(s => !closedStatuses.includes(s));
-          ticketStatusFilters.clear();
-          if (!isActive) {
-            allStatuses.forEach(s => { if (!closedStatuses.includes(s)) ticketStatusFilters.add(s); });
-          }
-          render();
-        });
       }
 
       // Expand All Open: apply open filter + expand all epics
