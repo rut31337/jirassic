@@ -1,0 +1,278 @@
+#!/usr/bin/env python3
+"""Generate a quarterly self-evaluation draft from Jira tickets and meeting action items.
+
+Usage: my-quarterly-review [QUARTER] [YEAR] [--no-priorities]
+
+  QUARTER         Q1, Q2, Q3, Q4 (default: previous quarter)
+  YEAR            4-digit year (default: current year)
+  --no-priorities Skip the priorities section
+
+Uses Claude on Vertex AI (same backend as Parsec).
+
+Environment variables:
+    JIRA_API_TOKEN      — Jira API token (required)
+    JIRA_EMAIL          — Jira account email (required)
+    JIRA_SITE           — Jira site hostname (required)
+    ANTHROPIC_VERTEX_PROJECT_ID — GCP project for Vertex AI (required)
+    ANTHROPIC_VERTEX_REGION    — Vertex region (default: us-east5)
+
+Examples:
+    my-quarterly-review              # previous quarter accomplishments + priorities
+    my-quarterly-review Q1           # Q1 of current year
+    my-quarterly-review Q4 2025      # Q4 of a specific year
+    my-quarterly-review --no-priorities  # accomplishments only
+"""
+
+import base64
+import json
+import os
+import subprocess
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import date
+
+# ── Args ──
+
+args = [a for a in sys.argv[1:] if not a.startswith("--")]
+flags = [a for a in sys.argv[1:] if a.startswith("--")]
+INCLUDE_PRIORITIES = "--no-priorities" not in flags
+
+today = date.today()
+current_q = (today.month - 1) // 3 + 1
+
+quarter = None
+year = today.year
+for a in args:
+    if a.upper().startswith("Q") and a[1:].isdigit():
+        quarter = int(a[1:])
+    elif a.isdigit() and len(a) == 4:
+        year = int(a)
+
+if quarter is None:
+    quarter = current_q - 1 if current_q > 1 else 4
+    if quarter == 4 and current_q == 1:
+        year -= 1
+
+if quarter not in (1, 2, 3, 4):
+    print(f"Error: invalid quarter Q{quarter}", file=sys.stderr)
+    sys.exit(1)
+
+q_start_month = (quarter - 1) * 3 + 1
+q_start = f"{year}-{q_start_month:02d}-01"
+if quarter == 4:
+    q_end = f"{year + 1}-01-01"
+else:
+    q_end = f"{year}-{q_start_month + 3:02d}-01"
+
+q_label = f"Q{quarter} {year}"
+print(f"Generating review for {q_label} ({q_start} to {q_end})...", file=sys.stderr)
+
+# ── Jira ──
+
+JIRA_API_TOKEN = os.environ.get("JIRA_API_TOKEN")
+JIRA_EMAIL = os.environ.get("JIRA_EMAIL")
+JIRA_SITE = os.environ.get("JIRA_SITE")
+
+if not JIRA_API_TOKEN or not JIRA_EMAIL or not JIRA_SITE:
+    print("Error: JIRA_API_TOKEN, JIRA_EMAIL, and JIRA_SITE must be set.", file=sys.stderr)
+    sys.exit(1)
+
+
+def jira_search(jql, fields="summary,status,resolutiondate,customfield_10028,parent", max_results=100):
+    url = f"https://{JIRA_SITE}/rest/api/3/search/jql"
+    params = urllib.parse.urlencode({"jql": jql, "fields": fields, "maxResults": max_results})
+    url = f"{url}?{params}"
+    credentials = base64.b64encode(f"{JIRA_EMAIL}:{JIRA_API_TOKEN}".encode()).decode()
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Basic {credentials}",
+        "Accept": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        print(f"Jira API error: {e.code}", file=sys.stderr)
+        sys.exit(1)
+
+
+print("Fetching closed tickets...", file=sys.stderr)
+closed_data = jira_search(
+    f'assignee = currentUser() AND statusCategory = Done AND resolved >= "{q_start}" AND resolved < "{q_end}" ORDER BY resolved DESC'
+)
+
+closed_tickets = []
+total_points = 0
+for issue in closed_data.get("issues", []):
+    f = issue["fields"]
+    points = f.get("customfield_10028") or 0
+    total_points += points
+    parent = f.get("parent", {})
+    epic = parent.get("fields", {}).get("summary", "") if parent else ""
+    closed_tickets.append({
+        "key": issue["key"],
+        "summary": f["summary"],
+        "resolved": (f.get("resolutiondate") or "")[:10],
+        "points": points,
+        "epic": epic,
+    })
+
+print(f"  Found {len(closed_tickets)} closed tickets ({total_points} story points)", file=sys.stderr)
+
+# Also fetch open/in-progress tickets for priorities
+open_tickets = []
+if INCLUDE_PRIORITIES:
+    print("Fetching open tickets...", file=sys.stderr)
+    open_data = jira_search(
+        'assignee = currentUser() AND statusCategory != Done ORDER BY priority DESC, updated DESC',
+        fields="summary,status,priority,customfield_10028,parent",
+    )
+    for issue in open_data.get("issues", []):
+        f = issue["fields"]
+        parent = f.get("parent", {})
+        epic = parent.get("fields", {}).get("summary", "") if parent else ""
+        open_tickets.append({
+            "key": issue["key"],
+            "summary": f["summary"],
+            "status": f["status"]["name"],
+            "priority": f.get("priority", {}).get("name", ""),
+            "points": f.get("customfield_10028") or 0,
+            "epic": epic,
+        })
+    print(f"  Found {len(open_tickets)} open tickets", file=sys.stderr)
+
+# ── Action Items ──
+
+print("Fetching meeting action items...", file=sys.stderr)
+q_days = (today - date(year, q_start_month, 1)).days + 1
+try:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(script_dir, "my-action-items"),
+        os.path.expanduser("~/jirassic/cli/my-action-items"),
+    ]
+    action_items_cmd = next((c for c in candidates if os.path.isfile(c)), "my-action-items")
+    result = subprocess.run(
+        [action_items_cmd, "--json", str(q_days)],
+        capture_output=True, text=True, timeout=120,
+    )
+    all_meetings = json.loads(result.stdout) if result.stdout.strip() else []
+except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
+    all_meetings = []
+
+# Filter to just the quarter's date range
+from email.utils import parsedate_to_datetime
+quarter_meetings = []
+for m in all_meetings:
+    try:
+        d = parsedate_to_datetime(m["date"]).strftime("%Y-%m-%d")
+        if q_start <= d < q_end:
+            quarter_meetings.append(m)
+    except Exception:
+        quarter_meetings.append(m)
+
+total_items = sum(len(m.get("items", [])) for m in quarter_meetings)
+print(f"  Found {total_items} action items across {len(quarter_meetings)} meetings", file=sys.stderr)
+
+# ── Build Prompt ──
+
+closed_text = "\n".join(
+    f"- {t['key']} | {t['summary']} | pts={t['points']} | epic={t['epic'] or 'none'} | resolved={t['resolved']}"
+    for t in closed_tickets
+)
+
+items_text = ""
+for m in quarter_meetings:
+    items_text += f"\nMeeting: {m['meeting']} ({m['date']})\n"
+    for item in m.get("items", []):
+        items_text += f"  - {item}\n"
+
+accomplishments_prompt = f"""You are helping an infrastructure engineer write their quarterly self-evaluation.
+
+Based on the data below, write an "Accomplishments" section for {q_label}.
+
+The evaluation asks: "What accomplishments are you most proud of last quarter? Reflect not only on WHAT you've accomplished but also on HOW you've accomplished it."
+
+Rules:
+- Group related tickets into themes (e.g. by epic or project area)
+- Each theme gets a short heading and 2-3 sentence paragraph
+- Mention story points and ticket counts per theme
+- Highlight the HOW: cross-team collaboration, proactive work, automation, etc.
+- Write in first person
+- Be concise — no fluff, no bullet points within paragraphs
+- Output plain text, no markdown formatting
+
+CLOSED TICKETS ({len(closed_tickets)} tickets, {total_points} story points):
+{closed_text}
+
+MEETING ACTION ITEMS ({total_items} items):
+{items_text}
+"""
+
+priorities_prompt = ""
+if INCLUDE_PRIORITIES:
+    open_text = "\n".join(
+        f"- {t['key']} | {t['summary']} | {t['status']} | {t['priority']} | pts={t['points']} | epic={t['epic'] or 'none'}"
+        for t in open_tickets
+    )
+    # Include recent action items (last 30 days) for forward-looking context
+    recent_meetings = []
+    for m in all_meetings:
+        try:
+            d = parsedate_to_datetime(m["date"]).strftime("%Y-%m-%d")
+            cutoff = (today.replace(day=1)).strftime("%Y-%m-%d")
+            if d >= cutoff:
+                recent_meetings.append(m)
+        except Exception:
+            pass
+
+    recent_items_text = ""
+    for m in recent_meetings:
+        recent_items_text += f"\nMeeting: {m['meeting']} ({m['date']})\n"
+        for item in m.get("items", []):
+            recent_items_text += f"  - {item}\n"
+
+    priorities_prompt = f"""
+
+Now write a "Priorities" section for the upcoming quarter.
+
+The evaluation asks: "What are your top priorities for this quarter?"
+
+Rules:
+- Group into 5-8 themes
+- Each theme gets a heading and 1-2 sentences
+- Be forward-looking — what will you deliver, not what you'll work on
+- Plain text, no markdown
+
+OPEN TICKETS ({len(open_tickets)} tickets):
+{open_text}
+
+RECENT ACTION ITEMS:
+{recent_items_text}
+"""
+
+full_prompt = accomplishments_prompt + priorities_prompt
+
+# ── Claude on Vertex AI ──
+
+print("Generating draft with Claude on Vertex...", file=sys.stderr)
+
+from anthropic import AnthropicVertex
+
+project_id = os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID")
+if not project_id:
+    print("Error: ANTHROPIC_VERTEX_PROJECT_ID must be set.", file=sys.stderr)
+    sys.exit(1)
+region = os.environ.get("ANTHROPIC_VERTEX_REGION", "us-east5")
+
+client = AnthropicVertex(project_id=project_id, region=region)
+
+response = client.messages.create(
+    model="claude-sonnet-4-6",
+    max_tokens=4096,
+    messages=[{"role": "user", "content": full_prompt}],
+)
+
+print(file=sys.stderr)
+print(response.content[0].text)
