@@ -18,6 +18,7 @@ const IS_MACOS = process.platform === "darwin";
 
 // Cache the current Jira user's account ID (resolved on first use)
 let jiraAccountId = null;
+let currentDaysOverride = null;
 async function getJiraAccountId() {
   if (jiraAccountId) return jiraAccountId;
   const email = process.env.JIRA_EMAIL;
@@ -294,7 +295,8 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && (req.url === "/api/refresh" || req.url.startsWith("/api/refresh?"))) {
     const params = new URL(req.url, "http://localhost").searchParams;
     const overrideDays = params.get("days");
-    const data = await fetchAllData(overrideDays);
+    if (overrideDays) currentDaysOverride = overrideDays;
+    const data = await fetchAllData(overrideDays || currentDaysOverride);
     notifyNewActionItems(data);
     broadcast({ type: "refresh", data });
     json({ ok: true });
@@ -1366,7 +1368,7 @@ function getDashboardHTML() {
     <span style="font-size:1.2em;color:#8b949e;vertical-align:middle">Daily Triage Dashboard</span>
     <span style="display:inline-flex;align-items:center;gap:0.3rem;">
       <span style="color:var(--text-muted);font-size:0.8rem;">Meeting notes from last</span>
-      <input type="number" id="days-input" min="1" max="90" placeholder="${process.env.TRIAGE_DAYS || '7'}" title="Days of meeting notes to search" style="width:45px;padding:4px 6px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:0.85rem;text-align:center;">
+      <input type="number" id="days-input" min="1" max="90" value="${currentDaysOverride || process.env.TRIAGE_DAYS || '7'}" title="Days of meeting notes to search" style="width:45px;padding:4px 6px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:0.85rem;text-align:center;">
       <span style="color:var(--text-muted);font-size:0.8rem;">days</span>
       <button class="refresh-btn" id="refresh-btn">Refresh</button>
     </span>
@@ -1523,7 +1525,6 @@ function getDashboardHTML() {
       await fetch(url, { method: 'POST' });
       btn.classList.remove('loading');
       btn.textContent = 'Refresh';
-      if (days) daysInput.value = ''; // Clear override after use
     };
 
     async function triageItem(hash, status, ticket, text, meeting) {
@@ -3371,7 +3372,7 @@ server.listen(PORT, () => {
   // Auto-refresh every 60 seconds
   setInterval(async () => {
     try {
-      const data = await fetchAllData();
+      const data = await fetchAllData(currentDaysOverride);
       notifyNewActionItems(data);
       broadcast({ type: "refresh", data });
     } catch (e) {
