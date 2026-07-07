@@ -1784,6 +1784,7 @@ function getDashboardHTML() {
     }
 
     async function editSummary(key, currentSummary, el) {
+      if (el.querySelector('input')) return;
       const input = document.createElement('input');
       input.className = 'modal-input';
       input.value = currentSummary;
