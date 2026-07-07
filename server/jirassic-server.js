@@ -5,6 +5,15 @@ const crypto = require("crypto");
 const { execFile } = require("child_process");
 const { WebSocketServer } = require("ws");
 
+// Re-read ~/.env on every (re)start so --watch picks up config changes
+try {
+  const envFile = path.join(process.env.HOME, ".env");
+  for (const line of fs.readFileSync(envFile, "utf8").split("\n")) {
+    const m = line.match(/^export\s+([A-Za-z_][A-Za-z0-9_]*)=["']?(.*?)["']?\s*$/);
+    if (m) process.env[m[1]] = m[2];
+  }
+} catch {}
+
 const PORT = 31337;
 const PROJECT_ROOT = process.env.PROJECT_ROOT || path.join(__dirname, "..");
 const CLI_DIR = path.join(PROJECT_ROOT, "cli");
