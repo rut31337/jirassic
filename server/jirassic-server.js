@@ -1520,7 +1520,12 @@ function getDashboardHTML() {
         const msg = JSON.parse(e.data);
         if (msg.type === 'refresh') {
           DATA = msg.data;
-          if (!document.querySelector('.modal-overlay')) render();
+          const interacting = document.querySelector('.modal-overlay') ||
+            document.querySelector('.jirassic-dropdown') ||
+            document.activeElement?.tagName === 'INPUT' ||
+            document.activeElement?.tagName === 'SELECT' ||
+            window.getSelection()?.toString();
+          if (!interacting) render();
         }
       };
     }
