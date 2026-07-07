@@ -1517,7 +1517,7 @@ function getDashboardHTML() {
         const msg = JSON.parse(e.data);
         if (msg.type === 'refresh') {
           DATA = msg.data;
-          render();
+          if (!document.querySelector('.modal-overlay')) render();
         }
       };
     }
