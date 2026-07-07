@@ -27,7 +27,7 @@ const IS_MACOS = process.platform === "darwin";
 
 // Cache the current Jira user's account ID (resolved on first use)
 let jiraAccountId = null;
-let currentDaysOverride = null;
+let currentDaysOverride = loadState().daysOverride || null;
 async function getJiraAccountId() {
   if (jiraAccountId) return jiraAccountId;
   const email = process.env.JIRA_EMAIL;
@@ -304,7 +304,10 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && (req.url === "/api/refresh" || req.url.startsWith("/api/refresh?"))) {
     const params = new URL(req.url, "http://localhost").searchParams;
     const overrideDays = params.get("days");
-    if (overrideDays) currentDaysOverride = overrideDays;
+    if (overrideDays) {
+      currentDaysOverride = overrideDays;
+      const st = loadState(); st.daysOverride = overrideDays; saveState(st);
+    }
     const data = await fetchAllData(overrideDays || currentDaysOverride);
     notifyNewActionItems(data);
     broadcast({ type: "refresh", data });
