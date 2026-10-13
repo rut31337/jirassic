@@ -648,6 +648,50 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Jira API proxy — add a comment to a ticket
+  if (req.method === "POST" && req.url === "/api/jira/comment") {
+    try {
+      const { key, text } = JSON.parse(await readBody(req));
+      if (typeof key !== "string" || !/^[A-Z][A-Z0-9]*-\d+$/.test(key.trim())) {
+        json({ error: "Invalid issue key" }, 400);
+        return;
+      }
+      if (typeof text !== "string" || !text.trim()) {
+        json({ error: "Comment text required" }, 400);
+        return;
+      }
+      const content = text
+        .split("\n")
+        .filter((line) => line.trim())
+        .map((line) => ({ type: "paragraph", content: [{ type: "text", text: line }] }));
+      if (!content.length) {
+        json({ error: "Comment text required" }, 400);
+        return;
+      }
+      const email = process.env.JIRA_EMAIL;
+      const token = process.env.JIRA_API_TOKEN;
+      const auth = Buffer.from(`${email}:${token}`).toString("base64");
+      const resp = await fetch(`https://${JIRA_SITE}/rest/api/3/issue/${encodeURIComponent(key)}/comment`, {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${auth}`,
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ body: { type: "doc", version: 1, content } }),
+      });
+      if (resp.status === 201 || resp.ok) {
+        json({ ok: true });
+      } else {
+        const data = await resp.json();
+        json({ error: JSON.stringify(data.errors || data.errorMessages || data) }, 400);
+      }
+    } catch (e) {
+      json({ error: e.message }, 500);
+    }
+    return;
+  }
+
   // Config page
   if (req.method === "GET" && req.url === "/config") {
     res.writeHead(200, { "Content-Type": "text/html" });
@@ -2268,6 +2312,79 @@ function getDashboardHTML() {
       }
     }
 
+    async function addComment(key) {
+      const ticket = DATA?.tickets?.find(t => t.key === key);
+      const summary = ticket ? key + ': ' + ticket.summary : key;
+
+      const text = await new Promise((resolve) => {
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.style.zIndex = '400';
+        const modal = document.createElement('div');
+        modal.className = 'modal';
+        modal.style.width = '440px'; modal.style.background = 'var(--bg2)';
+
+        const h = document.createElement('h3');
+        h.textContent = 'Add comment';
+        modal.appendChild(h);
+
+        const details = document.createElement('div');
+        details.style.cssText = 'margin:1rem 0;font-size:0.9rem;';
+        const summaryP = document.createElement('p');
+        summaryP.style.cssText = 'margin-bottom:0.75rem;';
+        const summaryLabel = document.createElement('span');
+        summaryLabel.style.color = 'var(--text-muted)';
+        summaryLabel.textContent = 'Summary: ';
+        const summaryVal = document.createElement('span');
+        summaryVal.style.color = 'var(--text-bright)';
+        summaryVal.textContent = summary;
+        summaryP.appendChild(summaryLabel);
+        summaryP.appendChild(summaryVal);
+        details.appendChild(summaryP);
+
+        const textarea = document.createElement('textarea');
+        textarea.className = 'modal-input';
+        textarea.rows = 5;
+        textarea.style.cssText = 'width:100%;resize:vertical;font-family:inherit;';
+        textarea.placeholder = 'Progress update…';
+        details.appendChild(textarea);
+        modal.appendChild(details);
+
+        const actions = document.createElement('div');
+        actions.className = 'modal-actions';
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 'modal-btn cancel';
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.addEventListener('click', () => { overlay.remove(); resolve(null); });
+        const confirmBtn = document.createElement('button');
+        confirmBtn.className = 'modal-btn create';
+        confirmBtn.textContent = 'Post Comment';
+        confirmBtn.addEventListener('click', () => { overlay.remove(); resolve(textarea.value.trim()); });
+        actions.appendChild(cancelBtn);
+        actions.appendChild(confirmBtn);
+        modal.appendChild(actions);
+
+        overlay.appendChild(modal);
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) { overlay.remove(); resolve(null); } });
+        document.body.appendChild(overlay);
+        textarea.focus();
+      });
+
+      if (!text) return;
+
+      const resp = await fetch('/api/jira/comment', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, text }),
+      });
+      const data = await resp.json();
+      if (data.ok) {
+        showToast('Comment added to ' + key);
+      } else {
+        showToast('Error: ' + (data.error || 'unknown'));
+      }
+    }
+
     // Quick create ticket/epic
     async function quickCreate(epicKey, isEpic, passedEpicSummary) {
       const overlay = document.createElement('div');
@@ -2878,7 +2995,7 @@ function getDashboardHTML() {
           const epicStatusCell = epicStatusHidden
             ? '<td class="editable-status" data-key="' + esc(info.key) + '" data-is-epic="true" style="cursor:pointer;min-width:3rem" title="Click to set status">—</td>'
             : '<td class="editable-status" data-key="' + esc(info.key) + '" data-is-epic="true" style="cursor:pointer"><span class="badge status-' + sc + '">' + esc(info.status) + '</span></td>';
-          rows += '<tr class="epic-row" data-toggle-epic="' + eid + '"><td><span class="epic-arrow" id="arrow-' + eid + '">\\u25B6</span>' + jiraLink(info.key) + '<span class="badge epic">EPIC</span></td><td class="editable-summary" data-key="' + esc(info.key) + '" data-summary="' + esc(info.summary) + '" style="cursor:pointer">' + esc(info.summary) + ' <span style="color:#484f58;font-size:0.8rem">(' + childCount + ')</span></td>' + epicStatusCell + '<td class="editable-priority" data-key="' + esc(info.key) + '" style="cursor:pointer">' + esc(info.priority) + '</td><td>' + epicSPDisplay + '</td>' + (showSprint ? '<td></td>' : '') + '</tr>';
+          rows += '<tr class="epic-row" data-toggle-epic="' + eid + '"><td><span class="epic-arrow" id="arrow-' + eid + '">\\u25B6</span>' + jiraLink(info.key) + '<span class="badge epic">EPIC</span><button class="move-btn" data-comment="' + esc(info.key) + '" title="Add comment">Comment</button></td><td class="editable-summary" data-key="' + esc(info.key) + '" data-summary="' + esc(info.summary) + '" style="cursor:pointer">' + esc(info.summary) + ' <span style="color:#484f58;font-size:0.8rem">(' + childCount + ')</span></td>' + epicStatusCell + '<td class="editable-priority" data-key="' + esc(info.key) + '" style="cursor:pointer">' + esc(info.priority) + '</td><td>' + epicSPDisplay + '</td>' + (showSprint ? '<td></td>' : '') + '</tr>';
         } else {
           const allTicketInfo = (DATA?.tickets || []).find(t => t.key === key);
           const parentInfo = parentCache[key] || (allTicketInfo ? { summary: allTicketInfo.summary, status: allTicketInfo.status } : null);
@@ -2894,7 +3011,7 @@ function getDashboardHTML() {
           const statusCell2 = epicStatusHidden2
             ? '<td class="editable-status" data-key="' + esc(key) + '" data-is-epic="true" style="cursor:pointer;min-width:3rem" title="Click to set status">—</td>'
             : '<td class="editable-status" data-key="' + esc(key) + '" data-is-epic="true" style="cursor:pointer"><span class="badge status-' + parentSc + '">' + esc(parentStatus) + '</span></td>';
-          rows += '<tr class="epic-row" data-toggle-epic="' + eid + '"><td><span class="epic-arrow" id="arrow-' + eid + '">\\u25B6</span>' + jiraLink(key) + '<span class="badge epic">EPIC</span></td><td>' + parentLabel + ' <span style="color:#484f58;font-size:0.8rem">(' + childCount + ')</span></td>' + statusCell2 + '<td></td><td>' + epicSPDisplay2 + '</td>' + (showSprint ? '<td></td>' : '') + '</tr>';
+          rows += '<tr class="epic-row" data-toggle-epic="' + eid + '"><td><span class="epic-arrow" id="arrow-' + eid + '">\\u25B6</span>' + jiraLink(key) + '<span class="badge epic">EPIC</span><button class="move-btn" data-comment="' + esc(key) + '" title="Add comment">Comment</button></td><td>' + parentLabel + ' <span style="color:#484f58;font-size:0.8rem">(' + childCount + ')</span></td>' + statusCell2 + '<td></td><td>' + epicSPDisplay2 + '</td>' + (showSprint ? '<td></td>' : '') + '</tr>';
         }
         children.sort(sortByKey);
         for (const c of children) {
@@ -2902,7 +3019,7 @@ function getDashboardHTML() {
           const isClosed = c.status === 'Closed' || c.status === 'Done';
           const closedClass = isClosed ? ' ticket-closed' : '';
           const spDisplay = c.story_points ? c.story_points : '<span class="sp-warn" title="No story points set">⚠️</span>';
-          rows += '<tr class="epic-child ' + eid + closedClass + '" style="display:none"><td>' + jiraLink(c.key) + (isClosed ? '' : '<button class="move-btn" data-move="' + esc(c.key) + '" title="Change sprint">Sprint</button><button class="move-btn" data-dup="' + esc(c.key) + '" title="Duplicate ticket">Duplicate</button>') + '</td><td class="editable-summary" data-key="' + esc(c.key) + '" data-summary="' + esc(c.summary) + '" style="cursor:pointer">' + esc(c.summary) + '</td><td class="editable-status" data-key="' + esc(c.key) + '" style="cursor:pointer"><span class="badge status-' + sc + '">' + esc(c.status) + '</span></td><td class="editable-priority" data-key="' + esc(c.key) + '" style="cursor:pointer">' + esc(c.priority) + '</td><td class="editable-sp" data-key="' + esc(c.key) + '" style="cursor:pointer">' + spDisplay + '</td>' + (showSprint ? '<td style="font-size:0.8rem;color:var(--text-muted)">' + esc(sprintLabel(c)) + '</td>' : '') + '</tr>';
+          rows += '<tr class="epic-child ' + eid + closedClass + '" style="display:none"><td>' + jiraLink(c.key) + '<button class="move-btn" data-comment="' + esc(c.key) + '" title="Add comment">Comment</button>' + (isClosed ? '' : '<button class="move-btn" data-move="' + esc(c.key) + '" title="Change sprint">Sprint</button><button class="move-btn" data-dup="' + esc(c.key) + '" title="Duplicate ticket">Duplicate</button>') + '</td><td class="editable-summary" data-key="' + esc(c.key) + '" data-summary="' + esc(c.summary) + '" style="cursor:pointer">' + esc(c.summary) + '</td><td class="editable-status" data-key="' + esc(c.key) + '" style="cursor:pointer"><span class="badge status-' + sc + '">' + esc(c.status) + '</span></td><td class="editable-priority" data-key="' + esc(c.key) + '" style="cursor:pointer">' + esc(c.priority) + '</td><td class="editable-sp" data-key="' + esc(c.key) + '" style="cursor:pointer">' + spDisplay + '</td>' + (showSprint ? '<td style="font-size:0.8rem;color:var(--text-muted)">' + esc(sprintLabel(c)) + '</td>' : '') + '</tr>';
         }
         const epicKeyForAdd = info ? info.key : key;
         const epicSummaryForAdd = info ? info.summary : (parentCache[key]?.summary || (DATA?.tickets || []).find(t => t.key === key)?.summary || '');
@@ -2920,7 +3037,7 @@ function getDashboardHTML() {
           const isClosed = t.status === 'Closed' || t.status === 'Done';
           const closedClass = isClosed ? ' ticket-closed' : '';
           const spDisplay = t.story_points ? t.story_points : '<span class="sp-warn" title="No story points set">⚠️</span>';
-          rows += '<tr class="epic-child ' + sid + closedClass + '" style="display:none"><td>' + jiraLink(t.key) + (isClosed ? '' : '<button class="move-btn" data-move="' + esc(t.key) + '" title="Change sprint">Sprint</button><button class="move-btn" data-set-epic="' + esc(t.key) + '" title="Add to epic">Epic</button><button class="move-btn" data-dup="' + esc(t.key) + '" title="Duplicate ticket">Duplicate</button>') + '</td><td class="editable-summary" data-key="' + esc(t.key) + '" data-summary="' + esc(t.summary) + '" style="cursor:pointer">' + esc(t.summary) + '</td><td class="editable-status" data-key="' + esc(t.key) + '" style="cursor:pointer"><span class="badge status-' + sc + '">' + esc(t.status) + '</span></td><td class="editable-priority" data-key="' + esc(t.key) + '" style="cursor:pointer">' + esc(t.priority) + '</td><td class="editable-sp" data-key="' + esc(t.key) + '" style="cursor:pointer">' + spDisplay + '</td>' + (showSprint ? '<td style="font-size:0.8rem;color:var(--text-muted)">' + esc(sprintLabel(t)) + '</td>' : '') + '</tr>';
+          rows += '<tr class="epic-child ' + sid + closedClass + '" style="display:none"><td>' + jiraLink(t.key) + '<button class="move-btn" data-comment="' + esc(t.key) + '" title="Add comment">Comment</button>' + (isClosed ? '' : '<button class="move-btn" data-move="' + esc(t.key) + '" title="Change sprint">Sprint</button><button class="move-btn" data-set-epic="' + esc(t.key) + '" title="Add to epic">Epic</button><button class="move-btn" data-dup="' + esc(t.key) + '" title="Duplicate ticket">Duplicate</button>') + '</td><td class="editable-summary" data-key="' + esc(t.key) + '" data-summary="' + esc(t.summary) + '" style="cursor:pointer">' + esc(t.summary) + '</td><td class="editable-status" data-key="' + esc(t.key) + '" style="cursor:pointer"><span class="badge status-' + sc + '">' + esc(t.status) + '</span></td><td class="editable-priority" data-key="' + esc(t.key) + '" style="cursor:pointer">' + esc(t.priority) + '</td><td class="editable-sp" data-key="' + esc(t.key) + '" style="cursor:pointer">' + spDisplay + '</td>' + (showSprint ? '<td style="font-size:0.8rem;color:var(--text-muted)">' + esc(sprintLabel(t)) + '</td>' : '') + '</tr>';
         }
         rows += '<tr class="epic-child ' + sid + '" style="display:none"><td colspan="' + colSpan + '" style="padding-left:2.5rem"><button class="add-btn" data-add-task="">+ Add Task</button></td></tr>';
       }
@@ -3224,6 +3341,9 @@ function getDashboardHTML() {
       });
       app.querySelectorAll('[data-dup]').forEach(btn => {
         btn.addEventListener('click', (e) => { e.stopPropagation(); duplicateTicket(btn.dataset.dup); });
+      });
+      app.querySelectorAll('[data-comment]').forEach(btn => {
+        btn.addEventListener('click', (e) => { e.stopPropagation(); addComment(btn.dataset.comment); });
       });
 
       // Expand/collapse all
